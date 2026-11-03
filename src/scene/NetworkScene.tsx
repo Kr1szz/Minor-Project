@@ -97,18 +97,18 @@ function ComponentMesh(
   );
   const down = (e: ThreeEvent<PointerEvent>) => {
     if (ghost) return;
-    e.stopPropagation();
     if (connectionMode) {
+      e.stopPropagation();
       const first = useStore.getState().selected;
       if (first) connect(first, c.id);
       else setSelected(c.id);
       return;
     }
     if (placing) {
+      e.stopPropagation();
       setSelected(c.id);
-      return;
     }
-    setSelected(c.id);
+    // Otherwise let the event bubble to SceneContents, which selects and starts dragging.
   };
   return (
     <group
@@ -471,14 +471,29 @@ function SceneContents() {
   const rotation3 = useStore((s) => s.placementRotation3);
   const setPlacementRotation3 = useStore((s) => s.setPlacementRotation3);
   const [dragging, setDragging] = useState(false);
+  const drag = useRef<
+    {
+      id: string;
+      plane: THREE.Plane;
+      offset: THREE.Vector3;
+      start: [number, number, number];
+      moved: boolean;
+    } | null
+  >(null);
   const [handPosition, setHandPosition] = useState(new THREE.Vector3(0, 0, 0));
   const place = useStore((s) => s.place);
   const setSelected = useStore((s) => s.setSelected);
   const move = useStore((s) => s.move);
+  const moveLocal = useStore((s) => s.moveLocal);
+  const commitMove = useStore((s) => s.commitMove);
   const remove = useStore((s) => s.remove);
   const rotate = useStore((s) => s.rotate);
   const setRotation3 = useStore((s) => s.setRotation3);
+  const projectId = useStore((s) => s.projectId);
   const { camera, gl } = useThree();
+  const controls = useThree((s) => s.controls) as
+    | (THREE.EventDispatcher & { target: THREE.Vector3; update: () => void })
+    | null;
   const activeCustom = useStore((s) => s.activeCustom);
   const preview = placing === "custom"
     ? {
@@ -556,6 +571,8 @@ function SceneContents() {
       }
       if (e.key === "Escape") {
         useStore.getState().setPlacing(null);
+        if (drag.current) moveLocal(drag.current.id, drag.current.start);
+        drag.current = null;
         setDragging(false);
       }
       if ((e.key === "Delete" || e.key === "Backspace") && selected) {
@@ -610,6 +627,7 @@ function SceneContents() {
     selected,
     components,
     move,
+    moveLocal,
     remove,
     rotate,
     setRotation3,
@@ -617,23 +635,99 @@ function SceneContents() {
   ]);
   useEffect(() => {
     const frame = () => {
+      const { components } = useStore.getState();
+      if (!components.length || !controls) return;
       const bounds = new THREE.Box3();
       components.forEach((c) =>
         bounds.expandByPoint(new THREE.Vector3(...c.position))
       );
       const sphere = bounds.getBoundingSphere(new THREE.Sphere());
-      const controls = gl.domElement.parentElement?.querySelector("canvas");
-      void controls;
-      camera.position.set(
-        sphere.center.x + 8,
-        sphere.center.y + 7,
-        sphere.center.z + 9,
-      );
-      camera.lookAt(sphere.center);
+      // Keep the default viewing angle; back off far enough to fit the network.
+      const distance = Math.max(8, sphere.radius * 3.2);
+      const direction = new THREE.Vector3(8, 7, 9).normalize();
+      camera.position.copy(sphere.center).addScaledVector(direction, distance);
+      controls.target.copy(sphere.center);
+      controls.update();
     };
     window.addEventListener("pipelab:frame-scene", frame);
     return () => window.removeEventListener("pipelab:frame-scene", frame);
-  }, [camera, components, gl]);
+  }, [camera, controls]);
+  // Frame the network once the controls exist and again when the project loads.
+  useEffect(() => {
+    window.dispatchEvent(new CustomEvent("pipelab:frame-scene"));
+  }, [controls, projectId]);
+  useEffect(() => {
+    if (!dragging) return;
+    const raycaster = new THREE.Raycaster();
+    const pointer = new THREE.Vector2();
+    const hit = new THREE.Vector3();
+    const onMove = (event: PointerEvent) => {
+      const active = drag.current;
+      if (!active) return;
+      const rect = gl.domElement.getBoundingClientRect();
+      pointer.set(
+        (event.clientX - rect.left) / rect.width * 2 - 1,
+        -(event.clientY - rect.top) / rect.height * 2 + 1,
+      );
+      raycaster.setFromCamera(pointer, camera);
+      if (!raycaster.ray.intersectPlane(active.plane, hit)) return;
+      const target = hit.clone().sub(active.offset);
+      const p: [number, number, number] = [...active.start];
+      const axis = document.body.dataset.moveAxis;
+      if (axis === "x") p[0] = target.x;
+      else if (axis === "y") p[1] = target.y;
+      else if (axis === "z") p[2] = target.z;
+      else {
+        p[0] = target.x;
+        p[2] = target.z;
+      }
+      active.moved = true;
+      moveLocal(active.id, p);
+      setHandPosition(new THREE.Vector3(...p));
+    };
+    // Listen on the window so releasing the pointer anywhere ends the drag.
+    const onUp = () => {
+      const active = drag.current;
+      drag.current = null;
+      setDragging(false);
+      if (active?.moved) commitMove(active.id);
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onUp);
+    return () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
+    };
+  }, [dragging, camera, gl, moveLocal, commitMove]);
+  const startDrag = (
+    e: ThreeEvent<PointerEvent>,
+    component: ComponentEntity,
+  ) => {
+    const origin = new THREE.Vector3(...component.position);
+    // Free, X and Z drags slide on a horizontal plane; Y drags on a
+    // vertical plane facing the camera.
+    const normal = document.body.dataset.moveAxis === "y"
+      ? camera.getWorldDirection(new THREE.Vector3()).setY(0)
+      : new THREE.Vector3(0, 1, 0);
+    if (normal.lengthSq() < 1e-6) normal.set(0, 0, 1);
+    const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(
+      normal.normalize(),
+      origin,
+    );
+    const grab = e.ray.intersectPlane(plane, new THREE.Vector3()) ??
+      origin.clone();
+    drag.current = {
+      id: component.id,
+      plane,
+      offset: grab.sub(origin),
+      start: component.position,
+      moved: false,
+    };
+    setDragging(true);
+    setHandPosition(origin);
+  };
   const getPos = (
     e: ThreeEvent<PointerEvent>,
   ): [number, number, number] => [
@@ -809,45 +903,12 @@ function SceneContents() {
       {components.map((c) => (
         <group
           key={c.id}
-          onPointerMove={(e) => {
-            if (dragging && selected === c.id) {
-              const axis = document.body.dataset.moveAxis;
-              const p: [number, number, number] = [
-                e.point.x,
-                e.point.y,
-                e.point.z,
-              ];
-              if (axis === "x") {
-                p[1] = c.position[1];
-                p[2] = c.position[2];
-              } else if (axis === "y") {
-                p[0] = c.position[0];
-                p[2] = c.position[2];
-              } else if (axis === "z") {
-                p[0] = c.position[0];
-                p[1] = c.position[1];
-              } else p[1] = c.position[1];
-              move(c.id, p);
-              setHandPosition(new THREE.Vector3(...p));
-            }
-          }}
           onPointerDown={(e) => {
-            if (e.button !== 0) return;
+            if (e.button !== 0 || placing || connectionMode) return;
             e.stopPropagation();
-            if (connectionMode) {
-              if (selected) disconnect(selected, c.id);
-              else setSelected(c.id);
-              return;
-            }
-            if (!placing) {
-              setSelected(c.id);
-              if (c.type !== "tap") {
-                setDragging(true);
-                setHandPosition(new THREE.Vector3(...c.position));
-              }
-            }
+            setSelected(c.id);
+            if (c.type !== "tap") startDrag(e, c);
           }}
-          onPointerUp={() => setDragging(false)}
         >
           <ComponentMesh component={c} />
           {c.type === "tap" && selected === c.id && (
@@ -897,7 +958,6 @@ function SceneContents() {
       <OrbitControls
         enabled={!dragging}
         makeDefault
-        target={[0, 0, 0]}
         minDistance={3}
         maxDistance={60}
         maxPolarAngle={Math.PI / 1.95}

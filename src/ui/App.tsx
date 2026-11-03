@@ -6,6 +6,7 @@ import {
   ChevronDown,
   CircleHelp,
   Cloud,
+  CloudOff,
   Droplets,
   Gauge,
   Grid2X2,
@@ -65,7 +66,9 @@ export default function App() {
     toggleValve = useStore((s) => s.toggleValve),
     initialize = useStore((s) => s.initialize),
     apiStatus = useStore((s) => s.apiStatus),
-    apiError = useStore((s) => s.apiError);
+    apiError = useStore((s) => s.apiError),
+    pendingSaves = useStore((s) => s.pendingSaves),
+    connectionCount = useStore((s) => s.connections.length);
   const [tab, setTab] = useState<"build" | "simulate" | "diagnose" | "repair">(
     "build",
   );
@@ -81,6 +84,13 @@ export default function App() {
   const [customAgeDays, setCustomAgeDays] = useState(0);
   const [customFile, setCustomFile] = useState<File | null>(null);
   const selected = components.find((c) => c.id === selectedId);
+  const saveState = apiStatus === "error"
+    ? { tone: "offline", label: "Offline · changes not saved" }
+    : apiStatus === "connecting"
+    ? { tone: "connecting", label: "Connecting…" }
+    : pendingSaves > 0
+    ? { tone: "saving", label: "Saving…" }
+    : { tone: "saved", label: "All changes saved" };
   const turn = (direction: number) => {
     const index = rotateAxis === "x" ? 0 : rotateAxis === "y" ? 1 : 2;
     if (placing) {
@@ -164,10 +174,13 @@ export default function App() {
           </div>
         </div>
         <div className="project-name">
-          <span className="live-dot" /> <span>UNTITLED SYSTEM</span>
+          <span className={`live-dot ${saveState.tone}`} />{" "}
+          <span>UNTITLED SYSTEM</span>
           <ChevronDown size={13} />
-          <span className="save-state">
-            <Cloud size={14} /> All changes saved
+          <span className={`save-state ${saveState.tone}`}>
+            {apiStatus === "error" ? <CloudOff size={14} /> : <Cloud size={14} />}
+            {" "}
+            {saveState.label}
           </span>
         </div>
         <div className="top-actions">
@@ -214,7 +227,12 @@ export default function App() {
                   ? "CONNECTING"
                   : "API OFFLINE"}
               </span>
-              <button className="view-btn" onClick={() => setSelected(null)}>
+              <button
+                className="view-btn"
+                title="Clear selection"
+                aria-label="Clear selection"
+                onClick={() => setSelected(null)}
+              >
                 <Move3D size={14} /> Select
               </button>
               <div className="axis-tools">
@@ -290,8 +308,9 @@ export default function App() {
           <div className="scene-wrap">
             <NetworkScene />
             <div className="scene-hud">
-              <div className="hud-pill">
-                <span className="live-dot" /> SCENE LIVE
+              <div className={`hud-pill ${running ? "running" : ""}`}>
+                <span className="live-dot" />{" "}
+                {running ? "SIMULATION RUNNING" : "EDITING"}
               </div>
               <div className="hud-axis">
                 <span>Y</span>
@@ -319,14 +338,20 @@ export default function App() {
               <span className="cube-compass">N</span>
             </div>
           </div>
-          {apiError && <div className="api-error">{apiError}</div>}
+          {apiError && (
+            <div className="api-error" role="alert">
+              <CloudOff size={15} />
+              <span>{apiError}</span>
+              <button onClick={() => void initialize()}>Retry</button>
+            </div>
+          )}
           <div className="viewport-status">
             <span>
               <i className="status-dot green" /> {components.length} components
             </span>
             <span>
               <i className="status-dot teal" />{" "}
-              {useStore.getState().connections.length} connections
+              {connectionCount} connections
             </span>
             <span>
               GRID <b>0.5 m</b>
@@ -341,7 +366,7 @@ export default function App() {
               <span style={{ left: "89%" }} />
             </div>
             <span className="timeline-time">
-              00:00:00 <i>● LIVE</i>
+              00:00:00 {running && <i>● LIVE</i>}
             </span>
           </div>
         </section>
@@ -732,7 +757,7 @@ export default function App() {
                 <span className="live-dot" /> Deterministic network simulation ·
                 {" "}
                 {components.length} domain components ·{" "}
-                {useStore.getState().connections.length} connections
+                {connectionCount} connections
               </div>
             )}
         </section>

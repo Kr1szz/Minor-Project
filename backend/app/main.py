@@ -4,7 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from .database import Base, SessionLocal, engine
 from . import models
-from .schemas import AssetCreate, ComponentCreate, EventEnvelope, ProjectCreate, ProjectUpdate, SimulationRequest
+from .schemas import AssetCreate, ComponentCreate, ConnectionCreate, EventEnvelope, ProjectCreate, ProjectUpdate, SimulationRequest
 from .simulation import run_simulation
 
 Base.metadata.create_all(bind=engine)
@@ -74,9 +74,12 @@ async def delete_component(project_id: str, component_id: str, db: Session=Depen
     db.query(models.Connection).filter(models.Connection.project_id==project_id).filter((models.Connection.from_component==component_id)|(models.Connection.to_component==component_id)).delete(synchronize_session=False); db.delete(c); db.commit(); await publish(project_id, {'version':1,'type':'component_removed','project_id':project_id,'payload':{'component_id':component_id}}); return {'ok':True}
 
 @app.post('/projects/{project_id}/connections')
-async def add_connection(project_id: str, payload: dict, db: Session=Depends(db_session)):
+async def add_connection(project_id: str, payload: ConnectionCreate, db: Session=Depends(db_session)):
     if not db.get(models.Project,project_id): raise HTTPException(404,'Project not found')
-    c=models.Connection(project_id=project_id, **payload); db.add(c); db.commit(); await publish(project_id, {'version':1,'type':'connection_created','project_id':project_id,'payload':payload}); return {'id':c.id,**payload}
+    c=models.Connection(project_id=project_id, **payload.model_dump(exclude={'id'}))
+    if payload.id: c.id=payload.id
+    db.add(c); db.commit(); connection={'id':c.id,**payload.model_dump(exclude={'id'})}
+    await publish(project_id, {'version':1,'type':'connection_created','project_id':project_id,'payload':connection}); return connection
 
 @app.delete('/projects/{project_id}/connections/{connection_id}')
 async def delete_connection(project_id: str, connection_id: str, db: Session=Depends(db_session)):

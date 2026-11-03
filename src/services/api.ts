@@ -12,11 +12,19 @@ type ApiComponent = Omit<ComponentEntity, 'maxPressure' | 'pressureLoss' | 'flow
 };
 type ApiConnection = { id: string; from_component: string; from_port: string; to_component: string; to_port: string };
 type ApiProject = { id: string; name: string; source_pressure: number; components: ApiComponent[]; connections: ApiConnection[] };
-type ApiSimulation = { components: ApiComponent[]; diagnostic: Diagnostic; leaks?: SimulatedLeak[] };
+type ApiDiagnostic = { root_cause: ApiComponent | null; secondary_effects: ApiComponent[]; message: string; recommendation: string };
+type ApiSimulation = { components: ApiComponent[]; diagnostic: ApiDiagnostic; leaks?: SimulatedLeak[] };
 export type SimulatedLeak = { component_id: string; port_id: string; position: [number, number, number]; pressure: number; kind?: 'leak' | 'outlet' | 'break' };
-type ApiEvent = { type: string; payload?: ApiSimulation };
+export type ApiEvent =
+  | { type: 'simulation_completed'; payload: ApiSimulation }
+  | { type: 'component_added' | 'component_updated'; payload: ApiComponent }
+  | { type: 'component_removed'; payload: { component_id: string } }
+  | { type: 'connection_created'; payload: ApiConnection }
+  | { type: 'connection_removed'; payload: { connection_id: string } }
+  | { type: 'simulation_stopped' | 'error'; payload: Record<string, unknown> };
 
 const fromApi = (component: ApiComponent): ComponentEntity => ({
+  ...(component.properties ?? {}),
   ...component,
   maxPressure: component.max_pressure,
   pressureLoss: component.pressure_loss,
@@ -24,7 +32,17 @@ const fromApi = (component: ApiComponent): ComponentEntity => ({
   pressure: Number(component.pressure ?? 0),
   flow: Number(component.flow ?? 0),
   status: component.status ?? 'normal',
-  ...(component.properties ?? {}),
+});
+const fromApiDiagnostic = (diagnostic: ApiDiagnostic): Diagnostic => ({
+  rootCause: diagnostic.root_cause ? fromApi(diagnostic.root_cause) : null,
+  secondaryEffects: diagnostic.secondary_effects.map(fromApi),
+  message: diagnostic.message,
+  recommendation: diagnostic.recommendation,
+});
+const fromApiSimulation = (result: ApiSimulation) => ({
+  components: result.components.map(fromApi),
+  diagnostic: fromApiDiagnostic(result.diagnostic),
+  leaks: result.leaks ?? [],
 });
 const fromApiConnection = (connection: ApiConnection): Connection => ({
   id: connection.id,
@@ -42,14 +60,20 @@ const toApiConnection = (connection: Connection) => ({
 });
 const toApi = (component: ComponentEntity) => ({
   ...component,
-  properties: { rotation3: component.rotation3, fluid: component.fluid, ageDays: component.ageDays, health: component.health, lifeDays: component.lifeDays, customAssetId: component.customAssetId },
+  // health and lifeDays are simulation outputs; persisting them would let stale values shadow new results.
+  properties: { rotation3: component.rotation3, fluid: component.fluid, ageDays: component.ageDays, customAssetId: component.customAssetId },
   max_pressure: component.maxPressure,
   pressure_loss: component.pressureLoss,
   flow_resistance: component.flowResistance,
 });
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`${baseUrl}${path}`, { headers: { 'Content-Type': 'application/json', ...(init?.headers ?? {}) }, ...init });
+  let response: Response;
+  try {
+    response = await fetch(`${baseUrl}${path}`, { headers: { 'Content-Type': 'application/json', ...(init?.headers ?? {}) }, ...init });
+  } catch {
+    throw new Error(`Can't reach the PipeLab API at ${baseUrl}. Start it with "docker compose up".`);
+  }
   if (!response.ok) throw new Error(`API ${response.status}: ${await response.text()}`);
   return response.json() as Promise<T>;
 }
@@ -66,8 +90,7 @@ export const projectApi = {
     await Promise.all(connections.map(connection => request(`/projects/${projectId}/connections`, { method: 'POST', body: JSON.stringify(toApiConnection(connection)) })));
   },
   async simulate(projectId: string, pressure: number) {
-    const result = await request<ApiSimulation>(`/projects/${projectId}/simulate`, { method: 'POST', body: JSON.stringify({ source_pressure: pressure }) });
-    return { components: result.components.map(fromApi), diagnostic: result.diagnostic, leaks: result.leaks ?? [] };
+    return fromApiSimulation(await request<ApiSimulation>(`/projects/${projectId}/simulate`, { method: 'POST', body: JSON.stringify({ source_pressure: pressure }) }));
   },
   async reset(projectId: string) { return request<ApiProject>(`/projects/${projectId}/reset`, { method: 'POST' }); },
   async updatePressure(projectId: string, pressure: number) { return request(`/projects/${projectId}`, { method: 'PUT', body: JSON.stringify({ source_pressure: pressure }) }); },
@@ -83,5 +106,8 @@ export const projectApi = {
     socket.onerror = onError;
     return () => { socket?.close(); socket = null; };
   },
+  fromSimulation: fromApiSimulation,
+  fromComponent: fromApi,
+  fromConnection: fromApiConnection,
   fromProject(project: ApiProject) { return { components: project.components.map(fromApi), connections: project.connections.map(fromApiConnection), pressure: project.source_pressure }; },
 };
