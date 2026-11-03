@@ -1,0 +1,13 @@
+# Benchmark override. Reuses a locally built image with the pinned dependencies
+# and mounts the current application code read-only, so no network is needed.
+# docker compose -p pipelab-bench -f docker-compose.yml -f docs/analysis/compose.bench.yml up -d --no-build
+services:
+  backend:
+    image: minor-project-backend:latest
+    pull_policy: never
+    build: !reset null
+    environment:
+      PYTHONDONTWRITEBYTECODE: "1"
+    volumes:
+      # Relative to the first compose file, which is the repo root.
+      - ./backend/app:/app/app:ro

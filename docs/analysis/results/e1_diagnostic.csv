@@ -1,0 +1,2 @@
+pressure,message,recommendation,leak_kinds
+40,1 open pressurized port(s) are leaking.,Connect or cap each open port.,outlet

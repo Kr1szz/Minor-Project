@@ -1,0 +1,4 @@
+arm,trials,both_edits_kept,open_edit_lost,position_edit_lost,trials_with_loss
+concurrent_stale,500,0,267,233,500
+sequential_stale,500,0,500,0,500
+sequential_fresh,500,500,0,0,0

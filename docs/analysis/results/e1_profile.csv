@@ -1,0 +1,6 @@
+order,id,type,pressure_psi,flow,status,health
+0,tank-main,tank,40,0,normal,100
+1,pipe-main,pipe,38.0,38.0,normal,100
+2,valve-main,valve,38.0,19.0,normal,100
+3,pipe-upper,pipe,34.0,34.0,normal,100
+4,tap-main,tap,38.0,38.0,normal,100

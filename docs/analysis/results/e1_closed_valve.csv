@@ -1,0 +1,6 @@
+id,pressure_psi,flow,status
+tank-main,40,0,normal
+pipe-main,38.0,38.0,normal
+valve-main,38.0,0,normal
+pipe-upper,0,0,normal
+tap-main,0,0,normal

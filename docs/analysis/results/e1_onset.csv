@@ -1,0 +1,16 @@
+id,status,first_source_psi
+tank-main,normal,0.0
+pipe-main,normal,0.0
+valve-main,normal,0.0
+pipe-upper,normal,0.0
+tap-main,normal,0.0
+pipe-main,warning,59.5
+pipe-upper,warning,63.5
+pipe-main,failed,72.1
+pipe-upper,failed,76.1
+tap-main,warning,100.4
+tap-main,failed,122.1
+valve-main,warning,125.0
+valve-main,failed,152.1
+tank-main,warning,164.1
+tank-main,failed,200.1
