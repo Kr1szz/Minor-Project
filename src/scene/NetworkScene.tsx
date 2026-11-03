@@ -18,6 +18,7 @@ import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { OBJLoader } from "three/examples/jsm/loaders/OBJLoader.js";
 import { FBXLoader } from "three/examples/jsm/loaders/FBXLoader.js";
 import { useStore } from "../state/stores";
+import type { Axis } from "../state/stores";
 import type {
   ComponentEntity,
   ComponentType,
@@ -550,13 +551,14 @@ function SceneContents() {
         e.key.toLowerCase() === "q" || e.key.toLowerCase() === "e" ||
         e.key.toLowerCase() === "r"
       ) {
-        const axis = document.body.dataset.rotateAxis ?? "y";
+        const axis = useStore.getState().rotateAxis;
         const i = axis === "x" ? 0 : axis === "y" ? 1 : 2;
+        const turn = (e.key.toLowerCase() === "q" ? -1 : 1) * Math.PI / 2;
         if (placing) {
           const r: [number, number, number] = [
             ...useStore.getState().placementRotation3,
           ];
-          r[i] += Math.PI / 2;
+          r[i] += turn;
           setPlacementRotation3(r);
         } else if (selected) {
           const c = components.find((x) => x.id === selected);
@@ -564,7 +566,7 @@ function SceneContents() {
             const r: [number, number, number] = c.rotation3
               ? [...c.rotation3]
               : [0, c.rotation, 0];
-            r[i] += Math.PI / 2;
+            r[i] += turn;
             setRotation3(selected, r);
           }
         }
@@ -587,7 +589,7 @@ function SceneContents() {
         const c = components.find((x) => x.id === selected);
         if (c) {
           e.preventDefault();
-          const axis = document.body.dataset.moveAxis;
+          const axis = useStore.getState().moveAxis;
           const p: [number, number, number] = [...c.position];
           const step = .5;
           const key = e.key;
@@ -618,7 +620,7 @@ function SceneContents() {
       if (
         e.key.toLowerCase() === "x" || e.key.toLowerCase() === "y" ||
         e.key.toLowerCase() === "z"
-      ) document.body.dataset.moveAxis = e.key.toLowerCase();
+      ) useStore.getState().setMoveAxis(e.key.toLowerCase() as Axis);
     };
     window.addEventListener("keydown", keyDown);
     return () => window.removeEventListener("keydown", keyDown);
@@ -673,7 +675,7 @@ function SceneContents() {
       if (!raycaster.ray.intersectPlane(active.plane, hit)) return;
       const target = hit.clone().sub(active.offset);
       const p: [number, number, number] = [...active.start];
-      const axis = document.body.dataset.moveAxis;
+      const axis = useStore.getState().moveAxis;
       if (axis === "x") p[0] = target.x;
       else if (axis === "y") p[1] = target.y;
       else if (axis === "z") p[2] = target.z;
@@ -708,7 +710,7 @@ function SceneContents() {
     const origin = new THREE.Vector3(...component.position);
     // Free, X and Z drags slide on a horizontal plane; Y drags on a
     // vertical plane facing the camera.
-    const normal = document.body.dataset.moveAxis === "y"
+    const normal = useStore.getState().moveAxis === "y"
       ? camera.getWorldDirection(new THREE.Vector3()).setY(0)
       : new THREE.Vector3(0, 1, 0);
     if (normal.lengthSq() < 1e-6) normal.set(0, 0, 1);
@@ -727,6 +729,11 @@ function SceneContents() {
     };
     setDragging(true);
     setHandPosition(origin);
+  };
+  const placedOnPointerDown = useRef(false);
+  const placeAt = (type: ComponentType, position: [number, number, number]) => {
+    placedOnPointerDown.current = true;
+    place(type, position, rotation3[1], rotation3);
   };
   const getPos = (
     e: ThreeEvent<PointerEvent>,
@@ -770,8 +777,13 @@ function SceneContents() {
         }}
         onPointerDown={(e) => {
           e.stopPropagation();
-          if (placing) place(placing, getPos(e), rotation3[1], rotation3);
-          else if (!selected) setSelected(null);
+          placedOnPointerDown.current = false;
+          if (placing) placeAt(placing, getPos(e));
+        }}
+        onClick={(e) => {
+          // A placement click ends here too; keep the new part selected.
+          if (placedOnPointerDown.current) placedOnPointerDown.current = false;
+          else if (e.delta < 4) setSelected(null);
         }}
       >
         <planeGeometry args={[100, 100]} />
@@ -909,6 +921,7 @@ function SceneContents() {
             setSelected(c.id);
             if (c.type !== "tap") startDrag(e, c);
           }}
+          onClick={(e) => e.stopPropagation()}
         >
           <ComponentMesh component={c} />
           {c.type === "tap" && selected === c.id && (
@@ -936,7 +949,7 @@ function SceneContents() {
             position={snap.position}
             onPointerDown={(e) => {
               e.stopPropagation();
-              place(placing!, ghostPosition, rotation3[1], rotation3);
+              placeAt(placing!, ghostPosition);
             }}
           >
             <ComponentMesh

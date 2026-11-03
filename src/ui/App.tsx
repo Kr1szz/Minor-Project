@@ -74,8 +74,10 @@ export default function App() {
   );
   const [filter, setFilter] = useState("");
   const [notice, setNotice] = useState("");
-  const [moveAxis, setMoveAxis] = useState<"free" | "x" | "y" | "z">("free");
-  const [rotateAxis, setRotateAxis] = useState<"x" | "y" | "z">("z");
+  const moveAxis = useStore((s) => s.moveAxis),
+    setMoveAxis = useStore((s) => s.setMoveAxis),
+    rotateAxis = useStore((s) => s.rotateAxis),
+    setRotateAxis = useStore((s) => s.setRotateAxis);
   const [customOpen, setCustomOpen] = useState(false);
   const [customName, setCustomName] = useState("");
   const [customDescription, setCustomDescription] = useState("");
@@ -240,10 +242,7 @@ export default function App() {
                   <button
                     key={axis}
                     className={moveAxis === axis ? "selected" : ""}
-                    onClick={() => {
-                      setMoveAxis(axis);
-                      document.body.dataset.moveAxis = axis;
-                    }}
+                    onClick={() => setMoveAxis(axis)}
                   >
                     {axis.toUpperCase()}
                   </button>
@@ -259,10 +258,7 @@ export default function App() {
                     key={axis}
                     className={rotateAxis === axis ? "selected" : ""}
                     aria-label={`Rotate around ${axis.toUpperCase()} axis`}
-                    onClick={() => {
-                      setRotateAxis(axis);
-                      document.body.dataset.rotateAxis = axis;
-                    }}
+                    onClick={() => setRotateAxis(axis)}
                   >
                     {axis.toUpperCase()}
                   </button>
