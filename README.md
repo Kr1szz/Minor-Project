@@ -24,6 +24,15 @@ API docs are at `http://localhost:8000/docs`; health is `GET /health`. With `--d
 
 To run the pieces separately: `npm install && npm run dev` for the frontend, and from `backend/`, `uvicorn app.main:app --reload` inside a Python 3.12 virtual environment with `requirements.txt` installed.
 
+## Tests
+
+```bash
+npm test                                   # Vitest: API mapping and placement
+cd backend && .venv/bin/pytest             # pytest: simulator and API
+```
+
+`./dev.sh` creates `backend/.venv`; install the test tools into it once with `uv pip install --python backend/.venv/bin/python -r backend/requirements-dev.txt` (or `backend/.venv/bin/pip install -r backend/requirements-dev.txt`).
+
 ## First vertical slice
 
 The initial graph has a pressure tank, PVC pipe, ball valve and outlet tap joined through named ports. Select inventory to enter placement mode; click the viewport grid to place. Grid placement snaps to half-unit increments and snaps near the current run. Q/E or R rotates in quarter turns, Escape cancels, Delete removes a selected part, and arrow keys nudge selection. Select the valve to toggle it. Change source PSI and press **Simulate**. Diagnostics name the first overloaded component as root cause and list downstream taps separately. Replace component opens placement for that part type.
