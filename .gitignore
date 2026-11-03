@@ -3,3 +3,5 @@ dist
 *.tsbuildinfo
 __pycache__/
 *.py[cod]
+backend/.venv/
+*.db

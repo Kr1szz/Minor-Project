@@ -12,22 +12,17 @@ PipeLab is a browser based plumbing network editor and digital twin prototype. I
 
 ## Run locally
 
-Requirements: Node.js 20+, Python 3.12+ (for direct API run), Docker Compose (optional, for services).
+Requirements: Node.js 20+, and either [uv](https://docs.astral.sh/uv/) or Python 3.12/3.13. Docker Compose is optional.
 
 ```bash
-npm install
-npm run dev
+./dev.sh
 ```
 
-Open the Vite URL shown in the terminal. The frontend runs independently at `http://localhost:5173`.
+This installs dependencies on the first run, then starts the API on `http://localhost:8000` (SQLite in `backend/pipelab.db`) and the editor on `http://localhost:5173`. Ctrl+C stops both. Use `./dev.sh --docker` to run the API with PostgreSQL and Redis through Docker Compose instead, and `API_PORT` / `WEB_PORT` to change ports.
 
-Start backend and infrastructure:
+API docs are at `http://localhost:8000/docs`; health is `GET /health`. With `--docker`, PostgreSQL is exposed on host port `5433` to avoid conflicting with an existing local PostgreSQL service.
 
-```bash
-docker compose up --build
-```
-
-API docs are at `http://localhost:8000/docs`; health is `GET /health`. PostgreSQL is exposed on host port `5433` to avoid conflicting with an existing local PostgreSQL service. To run only the backend without Docker, use Python 3.12, create a virtual environment, install `backend/requirements.txt`, then from `backend/` run `uvicorn app.main:app --reload` (uses local SQLite by default).
+To run the pieces separately: `npm install && npm run dev` for the frontend, and from `backend/`, `uvicorn app.main:app --reload` inside a Python 3.12 virtual environment with `requirements.txt` installed.
 
 ## First vertical slice
 
