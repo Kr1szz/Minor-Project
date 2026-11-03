@@ -87,3 +87,7 @@ def test_port_positions_follow_three_js_euler_order():
     part = {'position': [0, 0, 0], 'rotation3': [pi / 2, pi / 2, 0]}
     # three.js: new Vector3(1, 0, 0).applyEuler(new Euler(PI / 2, PI / 2, 0)) -> (0, 1, 0)
     assert [round(v, 6) + 0 for v in port_world_position(part, {'position': [1, 0, 0]})] == [0, 1, 0]
+
+
+def test_open_tap_is_not_reported_as_a_leak(starter):
+    assert run_simulation(*starter, 40)['diagnostic']['message'] == 'All connected components are within their pressure ratings.'

@@ -1,9 +1,0 @@
-import { SimulationGraph } from './graph';
-import type { ComponentEntity } from './types';
-export interface Diagnostic { rootCause: ComponentEntity | null; secondaryEffects: ComponentEntity[]; message: string; recommendation: string }
-export function simulate(components: ComponentEntity[], connections: import('./types').Connection[], sourcePressure: number) {
-  const graph = new SimulationGraph(components, connections); const tank = components.find(c => c.type === 'tank'); const root = tank?.id ?? components[0]?.id; const reachable = root ? graph.connectedFrom(root) : [];
-  const result = components.map(c => { const connected = reachable.includes(c.id); const upstream = c.type === 'tank' ? 0 : c.type === 'pipe' || c.type === 'curved-pipe' ? 4 : c.type === 'valve' ? 3 : 3; const pressure = connected ? Math.max(0, sourcePressure - upstream) : 0; const status = !connected ? 'normal' : pressure > c.maxPressure ? 'failed' : pressure > c.maxPressure * .82 ? 'warning' : 'normal'; const flow = connected && c.type !== 'tank' ? Math.max(0, (c.open ? c.opening : 0) * pressure / Math.max(1, c.flowResistance)) : 0; return { ...c, pressure, flow, status: status as ComponentEntity['status'] }; });
-  const failed = result.find(c => c.status === 'failed'); const diagnostic: Diagnostic = failed ? { rootCause: failed, secondaryEffects: result.filter(c => c.id !== failed.id && reachable.includes(c.id) && c.type === 'tap'), message: `${failed.name} is above its ${failed.maxPressure} PSI pressure rating.`, recommendation: 'Replace this component with a higher-rated part or reduce source pressure.' } : { rootCause: null, secondaryEffects: [], message: 'All connected components are within their pressure ratings.', recommendation: 'System operating within rated limits.' };
-  return { components: result, diagnostic, graph };
-}

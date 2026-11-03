@@ -51,6 +51,7 @@ describe("snapPlacement", () => {
 
   it("keeps the dropped position when no port is within reach", () => {
     const snap = snapPlacement("pipe", [10, 0, 10], 0, [pipe("a", 0)], []);
-    expect(snap).toEqual({ position: [10, 0, 10] });
+    // Unsnapped parts rest on the floor at their catalog height.
+    expect(snap).toEqual({ position: [10, .17, 10] });
   });
 });

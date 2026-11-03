@@ -1,5 +1,4 @@
-import type { ComponentEntity, Connection } from '../domain/types';
-import type { Diagnostic } from '../domain/simulation';
+import type { ComponentEntity, Connection, Diagnostic } from '../domain/types';
 
 const baseUrl = (import.meta.env.VITE_API_URL ?? 'http://localhost:8000').replace(/\/$/, '');
 const socketUrl = baseUrl.replace(/^http/, 'ws');
@@ -73,7 +72,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   try {
     response = await fetch(`${baseUrl}${path}`, { headers: { 'Content-Type': 'application/json', ...(init?.headers ?? {}) }, ...init });
   } catch {
-    throw new Error(`Can't reach the PipeLab API at ${baseUrl}. Start it with "docker compose up".`);
+    throw new Error(`Can't reach the PipeLab API at ${baseUrl}. Start it with ./dev.sh.`);
   }
   if (!response.ok) throw new Error(`API ${response.status}: ${await response.text()}`);
   return response.json() as Promise<T>;

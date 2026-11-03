@@ -1,11 +1,11 @@
 import { create } from "zustand";
 import { catalog } from "../domain/catalog";
-import type { Diagnostic } from "../domain/simulation";
 import type {
   ComponentEntity,
   ComponentType,
   Connection,
   CustomAsset,
+  Diagnostic,
   Vec3,
 } from "../domain/types";
 import { snapPlacement } from "../domain/placement";
@@ -30,7 +30,7 @@ const initial: ComponentEntity[] = [
     flowResistance: 0,
     open: true,
     opening: 1,
-    ports: [{ ...catalog[4].ports[0], position: [.59, .25, 0] }],
+    ports: catalog[4].ports,
     status: "normal",
     pressure: 40,
     flow: 0,
@@ -185,7 +185,6 @@ type Store = {
   /** Updates position locally only; call commitMove to persist (used while dragging). */
   moveLocal: (id: string, position: Vec3) => void;
   commitMove: (id: string) => void;
-  rotate: (id: string, rotation: number) => void;
   setRotation3: (id: string, rotation: Vec3) => void;
   setMaterial: (id: string, material: string) => void;
   setFluid: (id: string, fluid: string) => void;
@@ -554,11 +553,6 @@ export const useStore = create<Store>((set, get) => ({
     set(staleResults(get));
     saveComponent(set, get, componentId);
   },
-  rotate: (componentId, rotation) => {
-    patchComponent(set, componentId, { rotation });
-    set(staleResults(get));
-    saveComponent(set, get, componentId);
-  },
   setRotation3: (componentId, rotation3) => {
     patchComponent(set, componentId, { rotation3 });
     set(staleResults(get));
@@ -734,8 +728,19 @@ export const useStore = create<Store>((set, get) => ({
       syncError(set, error);
     }
   },
+  // Live readings stop with the simulation; health estimates are kept.
   stopSimulation: () =>
-    set({ running: false, leaks: [], diagnostic: readyDiagnostic }),
+    set((s) => ({
+      running: false,
+      leaks: [],
+      diagnostic: readyDiagnostic,
+      components: s.components.map((c) => ({
+        ...c,
+        pressure: 0,
+        flow: 0,
+        status: "normal",
+      })),
+    })),
   reset: async () => {
     const projectId = get().projectId;
     if (!projectId) return;

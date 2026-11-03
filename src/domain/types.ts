@@ -65,3 +65,10 @@ export interface Connection {
   toComponent: string;
   toPort: string;
 }
+/** Simulation verdict computed by the API (backend/app/simulation.py). */
+export interface Diagnostic {
+  rootCause: ComponentEntity | null;
+  secondaryEffects: ComponentEntity[];
+  message: string;
+  recommendation: string;
+}

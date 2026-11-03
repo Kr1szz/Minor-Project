@@ -4,7 +4,11 @@ import { catalog } from './catalog';
 
 export type PlacementSnap = { position: Vec3; connection?: Omit<Connection, 'id'> };
 
-/** Snap a placed component's nearest free port onto the nearest free existing port. */
+/**
+ * Snap a placed component's nearest free port onto the nearest free existing port.
+ * `position` is the point on the floor; unsnapped parts rest on the floor at their
+ * catalog `restingHeight`.
+ */
 export function snapPlacement(
   type: ComponentType,
   position: Vec3,
@@ -13,6 +17,7 @@ export function snapPlacement(
   connections: Connection[],
 ): PlacementSnap {
   const definition = catalog.find(item => item.type === type);
+  position = [position[0], position[1] + Number(definition?.properties.restingHeight ?? 0), position[2]];
   if (!definition?.ports.length) return { position };
 
   const used = new Set<string>();

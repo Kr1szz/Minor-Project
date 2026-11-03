@@ -1,550 +1,252 @@
-import { Component, useEffect, useMemo, useState } from "react";
-import { useFrame, useLoader } from "@react-three/fiber";
-import { useRef } from "react";
-import * as THREE from "three";
+import { Component, useEffect, useMemo, useRef, useState } from "react";
 import type {
   ErrorInfo,
   MouseEvent as ReactMouseEvent,
   ReactNode,
 } from "react";
-import { Canvas, ThreeEvent, useThree } from "@react-three/fiber";
+import { Canvas, ThreeEvent, useFrame, useThree } from "@react-three/fiber";
 import {
+  ContactShadows,
+  Environment,
+  GizmoHelper,
+  GizmoViewport,
   Grid,
   Html,
+  Lightformer,
   OrbitControls,
   PerspectiveCamera,
 } from "@react-three/drei";
-import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
-import { OBJLoader } from "three/examples/jsm/loaders/OBJLoader.js";
-import { FBXLoader } from "three/examples/jsm/loaders/FBXLoader.js";
-import { useStore } from "../state/stores";
-import type { Axis } from "../state/stores";
+import * as THREE from "three";
+import { catalog } from "../domain/catalog";
+import { snapPlacement } from "../domain/placement";
 import type {
   ComponentEntity,
   ComponentType,
+  Connection,
   CustomAsset,
+  Vec3,
 } from "../domain/types";
-import { snapPlacement } from "../domain/placement";
+import type { SimulatedLeak } from "../services/api";
+import { useStore } from "../state/stores";
+import type { Axis } from "../state/stores";
+import { PartModel } from "./models";
 
-function CenteredModel({ object }: { object: THREE.Object3D }) {
-  const model = useMemo(() => {
-    const copy = object.clone(true);
-    const bounds = new THREE.Box3().setFromObject(copy);
-    const size = bounds.getSize(new THREE.Vector3());
-    const center = bounds.getCenter(new THREE.Vector3());
-    const scale = 1.45 / Math.max(size.x, size.y, size.z, 0.001);
-    copy.scale.multiplyScalar(scale);
-    copy.position.addScaledVector(center, -scale);
-    copy.traverse((child) => {
-      if ((child as THREE.Mesh).isMesh) {
-        child.castShadow = true;
-        child.receiveShadow = true;
+const eulerOf = (c: ComponentEntity) =>
+  new THREE.Euler(...(c.rotation3 ?? [0, c.rotation, 0]));
+const worldPort = (c: ComponentEntity, portId: string) => {
+  const port = c.ports.find((p) => p.id === portId);
+  return port
+    ? new THREE.Vector3(...port.position).applyEuler(eulerOf(c)).add(
+      new THREE.Vector3(...c.position),
+    )
+    : null;
+};
+
+/** +1 when water enters through the inlet port, -1 when it enters through the outlet. */
+function flowDirection(
+  c: ComponentEntity,
+  byId: Map<string, ComponentEntity>,
+  connections: Connection[],
+): 1 | -1 {
+  const neighbourPressure = (portId: string) => {
+    for (const edge of connections) {
+      if (edge.fromComponent === c.id && edge.fromPort === portId) {
+        return byId.get(edge.toComponent)?.pressure;
       }
-    });
-    return copy;
-  }, [object]);
-  return <primitive object={model} />;
-}
-
-function ImportedModel({ asset }: { asset: CustomAsset }) {
-  if (!asset.dataUrl || !asset.format) return null;
-  if (asset.format === "glb") return <GlbModel url={asset.dataUrl} />;
-  if (asset.format === "obj") return <ObjModel url={asset.dataUrl} />;
-  return <FbxModel url={asset.dataUrl} />;
-}
-function GlbModel({ url }: { url: string }) {
-  const result = useLoader(GLTFLoader, url);
-  return <CenteredModel object={result.scene} />;
-}
-function ObjModel({ url }: { url: string }) {
-  const object = useLoader(OBJLoader, url);
-  return <CenteredModel object={object} />;
-}
-function FbxModel({ url }: { url: string }) {
-  const object = useLoader(FBXLoader, url);
-  return <CenteredModel object={object} />;
-}
-
-function ComponentMesh(
-  { component: c, ghost = false }: {
-    component: ComponentEntity;
-    ghost?: boolean;
-  },
-) {
-  const selected = useStore((s) => s.selected === c.id);
-  const setSelected = useStore((s) => s.setSelected);
-  const remove = useStore((s) => s.remove);
-  const move = useStore((s) => s.move);
-  const placing = useStore((s) => s.placing);
-  const connectionMode = useStore((s) => s.connectionMode);
-  const connect = useStore((s) => s.connect);
-  const place = useStore((s) => s.place);
-  const rotate = useStore((s) => s.rotate);
-  const color = ghost
-    ? "#a7ed70"
-    : c.status === "failed"
-    ? "#ff5262"
-    : c.status === "warning"
-    ? "#ffbd4a"
-    : c.type === "pipe"
-    ? "#97a9a9"
-    : c.type === "valve"
-    ? "#dcae61"
-    : c.type === "tank"
-    ? "#8fa5a5"
-    : "#65c9d4";
-  const uploadedAsset = useStore((s) =>
-    s.customAssets.find((asset) => asset.id === c.customAssetId)
-  );
-  const down = (e: ThreeEvent<PointerEvent>) => {
-    if (ghost) return;
-    if (connectionMode) {
-      e.stopPropagation();
-      const first = useStore.getState().selected;
-      if (first) connect(first, c.id);
-      else setSelected(c.id);
-      return;
+      if (edge.toComponent === c.id && edge.toPort === portId) {
+        return byId.get(edge.fromComponent)?.pressure;
+      }
     }
-    if (placing) {
-      e.stopPropagation();
-      setSelected(c.id);
-    }
-    // Otherwise let the event bubble to SceneContents, which selects and starts dragging.
   };
+  const inlet = neighbourPressure("inlet");
+  const outlet = neighbourPressure("outlet");
+  return outlet !== undefined && (inlet === undefined || outlet > inlet) ? -1 : 1;
+}
+
+// Height of each model's top above its origin, for placing the selection chip.
+const modelTop: Record<ComponentType, number> = {
+  tank: 1.4,
+  pipe: .17,
+  "curved-pipe": .17,
+  valve: .4,
+  tap: .32,
+  custom: .25,
+};
+
+function ghostOf(
+  type: ComponentType,
+  rotation3: Vec3,
+  custom: CustomAsset | null,
+): ComponentEntity {
+  const def = catalog.find((d) => d.type === type)!;
+  return {
+    id: "ghost",
+    type,
+    name: custom?.name ?? def.name,
+    position: [0, 0, 0],
+    rotation: rotation3[1],
+    rotation3,
+    material: custom?.material ?? String(def.properties.material),
+    diameter: .25,
+    length: 1,
+    maxPressure: 100,
+    pressureLoss: 0,
+    flowResistance: 1,
+    open: true,
+    opening: 1,
+    ports: def.ports,
+    status: "normal",
+    pressure: 0,
+    flow: 0,
+    customAssetId: custom?.id,
+  };
+}
+
+/**
+ * Water escaping a port. Droplets leave along `direction` and fall under
+ * gravity; a burst sprays wider, an open tap pours a narrow stream.
+ */
+function Spray(
+  { leak, direction }: { leak: SimulatedLeak; direction: THREE.Vector3 },
+) {
+  const mesh = useRef<THREE.InstancedMesh>(null);
+  const kind = leak.kind ?? "leak";
+  const count = kind === "break" ? 48 : 32;
+  const seeds = useMemo(
+    () =>
+      Array.from({ length: count }, () => [
+        Math.random(),
+        Math.random() - .5,
+        Math.random() - .5,
+        Math.random() - .5,
+      ]),
+    [count],
+  );
+  const dummy = useMemo(() => new THREE.Object3D(), []);
+  useFrame(({ clock }) => {
+    if (!mesh.current) return;
+    // An open tap's droplets continue below the solid stream.
+    const speed = kind === "outlet" ? 2.2 : 1.1 + Math.min(leak.pressure, 150) / 50;
+    const spread = kind === "break" ? 1.1 : kind === "outlet" ? .05 : .3;
+    const life = kind === "outlet" ? .7 : .55;
+    seeds.forEach(([phase, jx, jy, jz], i) => {
+      const t = ((clock.elapsedTime / life + phase) % 1) * life;
+      const vx = (direction.x + jx * spread) * speed;
+      const vy = (direction.y + jy * spread) * speed;
+      const vz = (direction.z + jz * spread) * speed;
+      const y = vy * t - 4.9 * t * t;
+      dummy.position.set(vx * t, y, vz * t);
+      // Droplets vanish at the floor instead of falling through it.
+      const above = leak.position[1] + y > 0;
+      dummy.scale.setScalar(above ? 1 - t / life * .6 : 0);
+      dummy.updateMatrix();
+      mesh.current!.setMatrixAt(i, dummy.matrix);
+    });
+    mesh.current.instanceMatrix.needsUpdate = true;
+  });
+  const stream = kind === "outlet" ? Math.min(.9, leak.position[1]) : 0;
   return (
-    <group
-      position={c.position}
-      rotation={c.rotation3 ?? [0, c.rotation, 0]}
-      onPointerDown={down}
-    >
-      {(c.type === "pipe" || c.type === "curved-pipe") && c.type === "pipe" && (
-        <>
-          <mesh castShadow rotation={[0, 0, Math.PI / 2]}>
-            <cylinderGeometry args={[.15, .15, 1.9, 24, 1, true]} />
-            <meshStandardMaterial
-              color={color}
-              metalness={.65}
-              roughness={.3}
-              side={THREE.DoubleSide}
-              transparent
-              opacity={ghost ? .48 : 1}
-            />
-          </mesh>
-          <mesh rotation={[0, 0, Math.PI / 2]}>
-            <cylinderGeometry args={[.115, .115, 1.86, 20, 1, true]} />
-            <meshStandardMaterial color="#161f20" side={THREE.DoubleSide} />
-          </mesh>
-          {[-.95, .95].map((x) => (
-            <mesh key={x} position={[x, 0, 0]} rotation={[0, 0, Math.PI / 2]}>
-              <torusGeometry args={[.15, .035, 8, 24]} />
-              <meshStandardMaterial color="#c1cecc" metalness={.8} />
-            </mesh>
-          ))}
-        </>
+    <group position={leak.position}>
+      {stream > 0 && (
+        <mesh position={[0, -stream / 2, 0]}>
+          <cylinderGeometry args={[.018, .03, stream, 16, 1, true]} />
+          <meshStandardMaterial color="#58bdea" roughness={.05} transparent opacity={.75} depthWrite={false} />
+        </mesh>
       )}
-      {c.type === "curved-pipe" && (
-        <group rotation={[0, Math.PI / 2, 0]}>
-          <mesh castShadow rotation={[0, 0, 0]}>
-            <torusGeometry args={[.62, .15, 18, 32, Math.PI / 2]} />
-            <meshStandardMaterial
-              color={color}
-              metalness={.55}
-              roughness={.32}
-              side={THREE.DoubleSide}
-              transparent
-              opacity={ghost ? .5 : 1}
-            />
-          </mesh>
-          <mesh rotation={[0, 0, 0]}>
-            <torusGeometry args={[.62, .115, 14, 32, Math.PI / 2]} />
-            <meshStandardMaterial color="#161f20" side={THREE.DoubleSide} />
-          </mesh>
-          <mesh position={[.62, 0, 0]} rotation={[0, 0, Math.PI / 2]}>
-            <torusGeometry args={[.15, .03, 8, 20]} />
-            <meshStandardMaterial color="#c1cecc" metalness={.8} />
-          </mesh>
-          <mesh position={[0, 0, -.62]}>
-            <torusGeometry args={[.15, .03, 8, 20]} />
-            <meshStandardMaterial color="#c1cecc" metalness={.8} />
-          </mesh>
-        </group>
-      )}
-      {c.type === "valve" && (
-        <>
-          <mesh castShadow rotation={[0, 0, Math.PI / 2]}>
-            <cylinderGeometry args={[.15, .15, .78, 16]} />
-            <meshStandardMaterial
-              color={color}
-              metalness={.8}
-              roughness={.22}
-              transparent={ghost}
-              opacity={ghost ? .5 : 1}
-            />
-          </mesh>
-          <mesh position={[0, .3, 0]} castShadow>
-            <boxGeometry args={[.08, .55, .08]} />
-            <meshStandardMaterial color="#e8ba6b" metalness={.65} />
-          </mesh>
-          <mesh position={[0, .59, 0]} castShadow>
-            <torusGeometry args={[.19, .035, 8, 24]} />
-            <meshStandardMaterial color="#d4aa60" metalness={.7} />
-          </mesh>
-        </>
-      )}
-      {c.type === "tank" && (
-        <>
-          <mesh position={[0, .25, 0]} castShadow>
-            <cylinderGeometry args={[.48, .48, 1.35, 32]} />
-            <meshStandardMaterial
-              color={color}
-              metalness={.75}
-              roughness={.27}
-            />
-          </mesh>
-          <mesh position={[0, .94, 0]}>
-            <cylinderGeometry args={[.48, .48, .08, 32]} />
-            <meshStandardMaterial color="#bcc7c4" metalness={.8} />
-          </mesh>
-          <mesh position={[0, -.46, 0]}>
-            <cylinderGeometry args={[.48, .48, .08, 32]} />
-            <meshStandardMaterial color="#546969" metalness={.7} />
-          </mesh>
-          <mesh position={[.5, .25, 0]} rotation={[0, 0, Math.PI / 2]}>
-            <cylinderGeometry args={[.13, .13, .18, 16]} />
-            <meshStandardMaterial color="#94aaa6" metalness={.75} />
-          </mesh>
-        </>
-      )}
-      {c.type === "tap" && (
-        <group>
-          <mesh position={[0, .04, 0]} castShadow>
-            <cylinderGeometry args={[.09, .09, .56, 12]} />
-            <meshStandardMaterial color={color} metalness={.85} />
-          </mesh>
-          <mesh
-            position={[.13, .27, 0]}
-            rotation={[0, 0, Math.PI / 2]}
-            castShadow
-          >
-            <cylinderGeometry args={[.07, .07, .35, 12]} />
-            <meshStandardMaterial color="#d5e4e1" metalness={.9} />
-          </mesh>
-          <mesh position={[.13, .08, 0]}>
-            <torusGeometry args={[.1, .018, 8, 20]} />
-            <meshStandardMaterial color="#b5ceca" metalness={.9} />
-          </mesh>
-          <mesh position={[.13, .27, 0]} rotation={[0, 0, Math.PI / 2]}>
-            <torusGeometry args={[.085, .016, 8, 20]} />
-            <meshStandardMaterial
-              color={c.open ? "#b5ceca" : "#c97870"}
-              metalness={.8}
-            />
-          </mesh>
-          <mesh position={[.13, .27, 0]} rotation={[0, 0, Math.PI / 2]}>
-            <boxGeometry args={[.035, .18, .035]} />
-            <meshStandardMaterial
-              color={c.open ? "#a6e97a" : "#ef7872"}
-              metalness={.4}
-            />
-          </mesh>
-        </group>
-      )}
-      {!ghost && selected && (
-        <Html
-          center
-          position={[0, 1.03, 0]}
-          distanceFactor={11}
-          style={{ pointerEvents: "none" }}
-        >
-          <div
-            className={`health-marker ${
-              c.health !== undefined && c.health < 35
-                ? "low"
-                : c.health !== undefined && c.health < 65
-                ? "mid"
-                : ""
-            }`}
-          >
-            <span>HEALTH {Math.round(c.health ?? 100)}%</span>
-            <div className="health-track">
-              <i
-                style={{
-                  width: `${Math.max(0, Math.min(100, c.health ?? 100))}%`,
-                }}
-              />
-            </div>
-          </div>
+      <instancedMesh ref={mesh} args={[undefined, undefined, count]}>
+        <sphereGeometry args={[kind === "outlet" ? .03 : .026, 8, 8]} />
+        <meshStandardMaterial
+          color="#4fb8e8"
+          roughness={.1}
+          transparent
+          opacity={.85}
+        />
+      </instancedMesh>
+      {kind !== "outlet" && (
+        <Html center position={[0, .32, 0]} style={{ pointerEvents: "none" }}>
+          <span className={`scene-chip ${kind === "break" ? "danger" : "water"}`}>
+            {kind === "break" ? "Burst" : "Leak"} · {Math.round(leak.pressure)} psi
+          </span>
         </Html>
       )}
-      {c.type === "custom" && uploadedAsset?.dataUrl
-        ? <ImportedModel asset={uploadedAsset} />
-        : c.type === "custom" && (
-          <>
-            <mesh castShadow>
-              <boxGeometry args={[.8, .45, .45]} />
-              <meshStandardMaterial
-                color={color}
-                metalness={.45}
-                roughness={.35}
-              />
-            </mesh>
-            <mesh position={[-.5, 0, 0]} rotation={[0, 0, Math.PI / 2]}>
-              <cylinderGeometry args={[.13, .13, .2, 16]} />
-              <meshStandardMaterial color="#b9c9c3" metalness={.7} />
-            </mesh>
-            <mesh position={[.5, 0, 0]} rotation={[0, 0, Math.PI / 2]}>
-              <cylinderGeometry args={[.13, .13, .2, 16]} />
-              <meshStandardMaterial color="#b9c9c3" metalness={.7} />
-            </mesh>
-          </>
-        )}
-      {selected && !ghost && (
-        <mesh position={[0, 0, 0]}>
-          <sphereGeometry args={[.08, 12, 12]} />
-          <meshBasicMaterial color="#b3ef77" />
-        </mesh>
-      )}
-      {!ghost && c.status === "failed" && (
-        <mesh position={[0, .5, .05]}>
-          <sphereGeometry args={[.13, 12, 12]} />
-          <meshBasicMaterial color="#ff5365" />
-        </mesh>
-      )}
-      {!ghost && c.ports.map((p) => (
-        <mesh key={p.id} position={p.position}>
-          <sphereGeometry args={[.06, 10, 10]} />
-          <meshBasicMaterial color="#70d8bd" />
-        </mesh>
-      ))}
-      {ghost && (
-        <mesh position={[0, 0, 0]}>
-          <boxGeometry args={[2.2, .08, .08]} />
-          <meshBasicMaterial color="#a7ed70" transparent opacity={.2} />
-        </mesh>
-      )}
-      <group onPointerDown={down} />
     </group>
   );
 }
-function WaterFlow({ length }: { length: number }) {
-  const ref = useRef<THREE.Group>(null);
-  useFrame(({ clock }) => {
-    if (ref.current) {
-      const t = (clock.elapsedTime * 1.8) % Math.max(.1, length);
-      ref.current.position.y = -length / 2 + t;
-    }
-  });
-  return (
-    <group ref={ref}>
-      {[-.07, 0, .07].map((x, i) => (
-        <mesh key={i} position={[x, 0, 0]}>
-          <sphereGeometry args={[.085, 12, 12]} />
-          <meshBasicMaterial
-            color={i === 1 ? "#a8edff" : "#50c5f6"}
-            toneMapped={false}
-          />
-        </mesh>
-      ))}
-    </group>
-  );
-}
-function WaterJet(
-  { position, outlet = false, broken = false, pressure = 0 }: {
-    position: [number, number, number];
-    outlet?: boolean;
-    broken?: boolean;
-    pressure?: number;
-  },
-) {
-  const ref = useRef<THREE.Group>(null);
-  useFrame(({ clock }) => {
-    if (ref.current) {
-      ref.current.scale.y = .8 + Math.abs(Math.sin(clock.elapsedTime * 5)) * .6;
-      ref.current.rotation.z = broken
-        ? Math.sin(clock.elapsedTime * 7) * .12
-        : 0;
-    }
-  });
-  return (
-    <group
-      ref={ref}
-      position={position}
-      rotation={outlet ? [0, 0, -Math.PI / 2] : [0, 0, 0]}
-    >
-      {Array.from(
-        { length: 3 },
-        (_, i) => (
-          <mesh
-            key={i}
-            position={[
-              broken ? (i - 1) * .08 : 0,
-              outlet ? .12 : -.18 - i * .11,
-              0,
-            ]}
-          >
-            <cylinderGeometry
-              args={[
-                outlet ? .055 : .045,
-                outlet ? .025 : .012,
-                outlet ? .45 : .34,
-                10,
-              ]}
-            />
-            <meshBasicMaterial
-              color={i === 1 ? "#a8edff" : "#50c5f6"}
-              toneMapped={false}
-            />
-          </mesh>
-        ),
-      )}
-      <Html center position={[0, outlet ? .64 : .05, 0]}>
-        <span className={`water-tag ${broken ? "break" : ""}`}>
-          {broken
-            ? `BREAK · ${Math.round(pressure)} PSI`
-            : outlet
-            ? "OUTLET OPEN"
-            : "LEAK"}
-        </span>
-      </Html>
-    </group>
-  );
-}
-function HandCursor({ position }: { position: THREE.Vector3 }) {
-  const ref = useRef<THREE.Group>(null);
-  useFrame(({ clock }) => {
-    if (ref.current) {
-      ref.current.rotation.z = Math.sin(clock.elapsedTime * 4) * .08;
-    }
-  });
-  return (
-    <group ref={ref} position={position}>
-      <mesh position={[0, .18, 0]} rotation={[0, 0, -.15]} castShadow>
-        <capsuleGeometry args={[.075, .24, 5, 10]} />
-        <meshStandardMaterial color="#ecc6a1" roughness={.72} />
-      </mesh>
-      <mesh position={[0, .34, 0]} castShadow>
-        <sphereGeometry args={[.095, 12, 12]} />
-        <meshStandardMaterial color="#ecc6a1" roughness={.7} />
-      </mesh>
-      <mesh position={[.055, .02, .01]} rotation={[0, 0, -.8]} castShadow>
-        <capsuleGeometry args={[.04, .12, 4, 8]} />
-        <meshStandardMaterial color="#d9ad8b" />
-      </mesh>
-    </group>
-  );
-}
+
 function SceneContents() {
   const components = useStore((s) => s.components);
+  const connections = useStore((s) => s.connections);
   const running = useStore((s) => s.running);
-  const pressure = useStore((s) => s.pressure);
   const leaks = useStore((s) => s.leaks);
   const placing = useStore((s) => s.placing);
   const selected = useStore((s) => s.selected);
-  const connections = useStore((s) => s.connections);
   const connectionMode = useStore((s) => s.connectionMode);
-  const disconnect = useStore((s) => s.disconnect);
-  const [ghostPosition, setGhostPosition] = useState<[number, number, number]>([
-    0,
-    .2,
-    0,
-  ]);
+  const customAssets = useStore((s) => s.customAssets);
+  const activeCustom = useStore((s) => s.activeCustom);
   const rotation3 = useStore((s) => s.placementRotation3);
-  const setPlacementRotation3 = useStore((s) => s.setPlacementRotation3);
+  const projectId = useStore((s) => s.projectId);
+  const {
+    connect,
+    disconnect,
+    place,
+    setSelected,
+    move,
+    moveLocal,
+    commitMove,
+    remove,
+    setRotation3,
+    setPlacementRotation3,
+  } = useStore.getState();
+  const [ghostPosition, setGhostPosition] = useState<Vec3>([0, 0, 0]);
+  const [hovered, setHovered] = useState<string | null>(null);
   const [dragging, setDragging] = useState(false);
   const drag = useRef<
     {
       id: string;
       plane: THREE.Plane;
       offset: THREE.Vector3;
-      start: [number, number, number];
+      start: Vec3;
       moved: boolean;
     } | null
   >(null);
-  const [handPosition, setHandPosition] = useState(new THREE.Vector3(0, 0, 0));
-  const place = useStore((s) => s.place);
-  const setSelected = useStore((s) => s.setSelected);
-  const move = useStore((s) => s.move);
-  const moveLocal = useStore((s) => s.moveLocal);
-  const commitMove = useStore((s) => s.commitMove);
-  const remove = useStore((s) => s.remove);
-  const rotate = useStore((s) => s.rotate);
-  const setRotation3 = useStore((s) => s.setRotation3);
-  const projectId = useStore((s) => s.projectId);
   const { camera, gl } = useThree();
   const controls = useThree((s) => s.controls) as
     | (THREE.EventDispatcher & { target: THREE.Vector3; update: () => void })
     | null;
-  const activeCustom = useStore((s) => s.activeCustom);
-  const preview = placing === "custom"
-    ? {
-      id: "ghost",
-      type: "custom" as const,
-      name: activeCustom?.name ?? "Custom preview",
-      customAssetId: activeCustom?.id,
-      position: ghostPosition,
-      rotation: rotation3[1],
-      rotation3,
-      material: activeCustom?.material ?? "Steel",
-      diameter: .25,
-      length: 1,
-      maxPressure: activeCustom?.maxPressure ?? 100,
-      pressureLoss: 0,
-      flowResistance: 1,
-      open: true,
-      opening: 1,
-      ports: [],
-      status: "normal" as const,
-      pressure: 0,
-      flow: 0,
-    }
-    : placing
-    ? components.find((c) => c.type === placing) ?? {
-      id: "ghost",
-      type: placing,
-      name: "Preview",
-      position: ghostPosition,
-      rotation: rotation3[1],
-      rotation3,
-      material: "PVC",
-      diameter: .25,
-      length: 2,
-      maxPressure: 70,
-      pressureLoss: 0,
-      flowResistance: 1,
-      open: true,
-      opening: 1,
-      ports: [],
-      status: "normal" as const,
-      pressure: 0,
-      flow: 0,
-    }
-    : null;
-  const base = preview;
+  const byId = useMemo(
+    () => new Map(components.map((c) => [c.id, c])),
+    [components],
+  );
+
+  useEffect(() => {
+    gl.domElement.style.cursor = dragging
+      ? "grabbing"
+      : placing
+      ? "copy"
+      : hovered
+      ? connectionMode ? "crosshair" : "grab"
+      : "auto";
+  }, [gl, dragging, placing, hovered, connectionMode]);
+
   useEffect(() => {
     const keyDown = (e: KeyboardEvent) => {
       if (
         e.target instanceof HTMLElement &&
         ["INPUT", "TEXTAREA", "SELECT"].includes(e.target.tagName)
       ) return;
-      if (
-        e.key.toLowerCase() === "q" || e.key.toLowerCase() === "e" ||
-        e.key.toLowerCase() === "r"
-      ) {
+      const key = e.key.toLowerCase();
+      if (key === "q" || key === "e" || key === "r") {
         const axis = useStore.getState().rotateAxis;
         const i = axis === "x" ? 0 : axis === "y" ? 1 : 2;
-        const turn = (e.key.toLowerCase() === "q" ? -1 : 1) * Math.PI / 2;
+        const turn = (key === "q" ? -1 : 1) * Math.PI / 2;
         if (placing) {
-          const r: [number, number, number] = [
-            ...useStore.getState().placementRotation3,
-          ];
+          const r: Vec3 = [...useStore.getState().placementRotation3];
           r[i] += turn;
           setPlacementRotation3(r);
         } else if (selected) {
-          const c = components.find((x) => x.id === selected);
+          const c = byId.get(selected);
           if (c) {
-            const r: [number, number, number] = c.rotation3
-              ? [...c.rotation3]
-              : [0, c.rotation, 0];
+            const r: Vec3 = c.rotation3 ? [...c.rotation3] : [0, c.rotation, 0];
             r[i] += turn;
             setRotation3(selected, r);
           }
@@ -552,6 +254,7 @@ function SceneContents() {
       }
       if (e.key === "Escape") {
         useStore.getState().setPlacing(null);
+        useStore.getState().setConnectionMode(false);
         if (drag.current) moveLocal(drag.current.id, drag.current.start);
         drag.current = null;
         setDragging(false);
@@ -560,60 +263,30 @@ function SceneContents() {
         e.preventDefault();
         remove(selected);
       }
-      if (
-        selected &&
-        ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "w", "W", "s", "S"]
-          .includes(e.key)
-      ) {
-        const c = components.find((x) => x.id === selected);
-        if (c) {
-          e.preventDefault();
-          const axis = useStore.getState().moveAxis;
-          const p: [number, number, number] = [...c.position];
-          const step = .5;
-          const key = e.key;
-          if (axis === "x") {
-            p[0] += key === "ArrowLeft" || key === "ArrowDown" || key === "s" ||
-                key === "S"
-              ? -step
-              : step;
-          } else if (axis === "y") {
-            p[1] += key === "ArrowLeft" || key === "ArrowDown" || key === "s" ||
-                key === "S"
-              ? -step
-              : step;
-          } else if (axis === "z") {
-            p[2] += key === "ArrowLeft" || key === "ArrowDown" || key === "s" ||
-                key === "S"
-              ? -step
-              : step;
-          } else if (key === "ArrowLeft") p[0] -= step;
-          else if (key === "ArrowRight") p[0] += step;
-          else if (key === "ArrowUp") p[2] -= step;
-          else if (key === "ArrowDown") p[2] += step;
-          else if (key === "w" || key === "W") p[1] += step;
-          else if (key === "s" || key === "S") p[1] -= step;
-          move(selected, p);
-        }
+      const nudges = ["arrowleft", "arrowright", "arrowup", "arrowdown", "w", "s"];
+      const c = selected ? byId.get(selected) : undefined;
+      if (c && nudges.includes(key)) {
+        e.preventDefault();
+        const axis = useStore.getState().moveAxis;
+        const p: Vec3 = [...c.position];
+        const step = .5;
+        const back = key === "arrowleft" || key === "arrowdown" || key === "s";
+        if (axis !== "free") p[{ x: 0, y: 1, z: 2 }[axis]] += back ? -step : step;
+        else if (key === "arrowleft") p[0] -= step;
+        else if (key === "arrowright") p[0] += step;
+        else if (key === "arrowup") p[2] -= step;
+        else if (key === "arrowdown") p[2] += step;
+        else p[1] += key === "w" ? step : -step;
+        move(c.id, p);
       }
-      if (
-        e.key.toLowerCase() === "x" || e.key.toLowerCase() === "y" ||
-        e.key.toLowerCase() === "z"
-      ) useStore.getState().setMoveAxis(e.key.toLowerCase() as Axis);
+      if (key === "x" || key === "y" || key === "z") {
+        useStore.getState().setMoveAxis(key as Axis);
+      }
     };
     window.addEventListener("keydown", keyDown);
     return () => window.removeEventListener("keydown", keyDown);
-  }, [
-    placing,
-    selected,
-    components,
-    move,
-    moveLocal,
-    remove,
-    rotate,
-    setRotation3,
-    setPlacementRotation3,
-  ]);
+  }, [placing, selected, byId, move, moveLocal, remove, setRotation3, setPlacementRotation3]);
+
   useEffect(() => {
     const frame = () => {
       const { components } = useStore.getState();
@@ -623,8 +296,14 @@ function SceneContents() {
         bounds.expandByPoint(new THREE.Vector3(...c.position))
       );
       const sphere = bounds.getBoundingSphere(new THREE.Sphere());
-      // Keep the default viewing angle; back off far enough to fit the network.
-      const distance = Math.max(8, sphere.radius * 3.2);
+      // Keep the default viewing angle; back off until the network fits the
+      // narrower of the two fields of view (portrait phones are width-bound).
+      const lens = camera as THREE.PerspectiveCamera;
+      const vertical = THREE.MathUtils.degToRad(lens.fov);
+      const horizontal = 2 * Math.atan(Math.tan(vertical / 2) * lens.aspect);
+      // Positions are part centres, so pad the radius for the parts' own size.
+      const radius = Math.max(sphere.radius, 1.5) + 1;
+      const distance = radius / Math.sin(Math.min(vertical, horizontal) / 2);
       const direction = new THREE.Vector3(8, 7, 9).normalize();
       camera.position.copy(sphere.center).addScaledVector(direction, distance);
       controls.target.copy(sphere.center);
@@ -637,6 +316,7 @@ function SceneContents() {
   useEffect(() => {
     window.dispatchEvent(new CustomEvent("pipelab:frame-scene"));
   }, [controls, projectId]);
+
   useEffect(() => {
     if (!dragging) return;
     const raycaster = new THREE.Raycaster();
@@ -653,7 +333,7 @@ function SceneContents() {
       raycaster.setFromCamera(pointer, camera);
       if (!raycaster.ray.intersectPlane(active.plane, hit)) return;
       const target = hit.clone().sub(active.offset);
-      const p: [number, number, number] = [...active.start];
+      const p: Vec3 = [...active.start];
       const axis = useStore.getState().moveAxis;
       if (axis === "x") p[0] = target.x;
       else if (axis === "y") p[1] = target.y;
@@ -664,7 +344,6 @@ function SceneContents() {
       }
       active.moved = true;
       moveLocal(active.id, p);
-      setHandPosition(new THREE.Vector3(...p));
     };
     // Listen on the window so releasing the pointer anywhere ends the drag.
     const onUp = () => {
@@ -682,10 +361,8 @@ function SceneContents() {
       window.removeEventListener("pointercancel", onUp);
     };
   }, [dragging, camera, gl, moveLocal, commitMove]);
-  const startDrag = (
-    e: ThreeEvent<PointerEvent>,
-    component: ComponentEntity,
-  ) => {
+
+  const startDrag = (e: ThreeEvent<PointerEvent>, component: ComponentEntity) => {
     const origin = new THREE.Vector3(...component.position);
     // Free, X and Z drags slide on a horizontal plane; Y drags on a
     // vertical plane facing the camera.
@@ -707,50 +384,66 @@ function SceneContents() {
       moved: false,
     };
     setDragging(true);
-    setHandPosition(origin);
   };
   const placedOnPointerDown = useRef(false);
-  const placeAt = (type: ComponentType, position: [number, number, number]) => {
+  const placeAt = (type: ComponentType, position: Vec3) => {
     placedOnPointerDown.current = true;
     place(type, position, rotation3[1], rotation3);
   };
-  const getPos = (
-    e: ThreeEvent<PointerEvent>,
-  ): [number, number, number] => [
+  const getPos = (e: ThreeEvent<PointerEvent>): Vec3 => [
     Math.round(e.point.x * 2) / 2,
     Math.round(e.point.y * 2) / 2,
     Math.round(e.point.z * 2) / 2,
   ];
+
+  const chosen = selected ? byId.get(selected) : undefined;
+  const chipHeight = chosen
+    ? Math.max(
+      chosen.position[1] + modelTop[chosen.type],
+      ...chosen.ports.map((p) => worldPort(chosen, p.id)?.y ?? 0),
+    ) + .35
+    : 0;
+  const ghost = placing ? ghostOf(placing, rotation3, activeCustom) : null;
+  const ghostSnap = placing
+    ? snapPlacement(placing, ghostPosition, rotation3, components, connections)
+    : null;
+
   return (
     <>
-      <ambientLight intensity={1.4} />
-      <directionalLight
-        position={[4, 8, 5]}
-        intensity={2.4}
-        castShadow
-        shadow-mapSize={[2048, 2048]}
-      />
-      <pointLight
-        position={[-4, 4, 1]}
-        intensity={18}
-        color="#7bb9bb"
-        distance={16}
+      <ambientLight intensity={.25} />
+      <directionalLight position={[6, 10, 7]} intensity={1.3} />
+      <Environment resolution={256} frames={1}>
+        {/* A bright studio backdrop; metals reflect it instead of black. */}
+        <color attach="background" args={["#d7e0dc"]} />
+        <Lightformer form="rect" intensity={2.2} position={[0, 8, 0]} rotation-x={Math.PI / 2} scale={[14, 14, 1]} />
+        <Lightformer form="rect" intensity={1.4} position={[-8, 3, 4]} rotation-y={Math.PI / 2} scale={[10, 4, 1]} />
+        <Lightformer form="rect" intensity={1.1} position={[8, 3, -4]} rotation-y={-Math.PI / 2} scale={[10, 4, 1]} />
+        <Lightformer form="rect" intensity={.7} color="#e8f0ec" position={[0, 2, -9]} scale={[16, 5, 1]} />
+      </Environment>
+      <ContactShadows
+        position={[0, .003, 0]}
+        scale={40}
+        resolution={1024}
+        far={5}
+        blur={2.2}
+        opacity={.4}
+        color="#1d2e28"
       />
       <Grid
         args={[40, 40]}
-        position={[0, -.04, 0]}
-        cellSize={1}
-        cellThickness={.55}
-        cellColor="#344447"
-        sectionSize={5}
-        sectionThickness={1.2}
-        sectionColor="#52696a"
-        fadeDistance={26}
+        position={[0, -.002, 0]}
+        cellSize={.5}
+        cellThickness={.6}
+        cellColor="#cfdad4"
+        sectionSize={2.5}
+        sectionThickness={1}
+        sectionColor="#a9bcb3"
+        fadeDistance={34}
+        fadeStrength={1.4}
         infiniteGrid
       />
       <mesh
         rotation={[-Math.PI / 2, 0, 0]}
-        position={[0, 0, 0]}
         onPointerMove={(e) => {
           if (placing) setGhostPosition(getPos(e));
         }}
@@ -765,191 +458,137 @@ function SceneContents() {
           else if (e.delta < 4) setSelected(null);
         }}
       >
-        <planeGeometry args={[100, 100]} />
+        <planeGeometry args={[200, 200]} />
         <meshBasicMaterial transparent opacity={0} depthWrite={false} />
       </mesh>
-      {connections.map((c) => {
-        const a = components.find((x) => x.id === c.fromComponent),
-          b = components.find((x) => x.id === c.toComponent);
-        if (!a || !b) return null;
-        const ap = a.ports.find((p) => p.id === c.fromPort)?.position ??
-            [0, 0, 0],
-          bp = b.ports.find((p) => p.id === c.toPort)?.position ?? [0, 0, 0];
-        const av = new THREE.Vector3(...a.position).add(
-            new THREE.Vector3(...ap).applyEuler(
-              new THREE.Euler(...(a.rotation3 ?? [0, a.rotation, 0])),
-            ),
-          ),
-          bv = new THREE.Vector3(...b.position).add(
-            new THREE.Vector3(...bp).applyEuler(
-              new THREE.Euler(...(b.rotation3 ?? [0, b.rotation, 0])),
-            ),
-          );
-        const delta = bv.clone().sub(av);
-        const len = delta.length();
-        const mid = av.clone().add(bv).multiplyScalar(.5);
-        const q = new THREE.Quaternion().setFromUnitVectors(
-          new THREE.Vector3(0, 1, 0),
-          delta.clone().normalize(),
-        );
-        const aligned = len <= .2;
-        const flowing = running && aligned && pressure > 0 &&
-          (a.flow > 0 || b.flow > 0);
-        const color = aligned ? (flowing ? "#4eb8df" : "#a6b5b1") : "#e3a66d";
+
+      {/* A joint whose ports no longer meet is drawn as a dotted gap; double-click it to disconnect. */}
+      {connections.map((edge) => {
+        const a = byId.get(edge.fromComponent);
+        const b = byId.get(edge.toComponent);
+        const from = a && worldPort(a, edge.fromPort);
+        const to = b && worldPort(b, edge.toPort);
+        if (!from || !to) return null;
+        const length = from.distanceTo(to);
+        if (length <= .2) return null;
+        const dots = Math.max(2, Math.ceil(length / .14));
         return (
           <group
-            key={c.id}
-            position={mid}
-            quaternion={q}
+            key={edge.id}
             onDoubleClick={(e) => {
               e.stopPropagation();
-              disconnect(a.id, b.id);
+              disconnect(edge.fromComponent, edge.toComponent);
             }}
           >
-            {aligned
-              ? (
-                <>
-                  <mesh castShadow>
-                    <cylinderGeometry
-                      args={[.15, .15, Math.max(.01, len), 20, 1, true]}
-                    />
-                    <meshStandardMaterial
-                      color={color}
-                      metalness={.55}
-                      roughness={.28}
-                      side={THREE.DoubleSide}
-                    />
-                  </mesh>
-                  <mesh>
-                    <cylinderGeometry
-                      args={[.112, .112, Math.max(.01, len - .02), 16, 1, true]}
-                    />
-                    <meshStandardMaterial
-                      color="#121a1c"
-                      side={THREE.DoubleSide}
-                    />
-                  </mesh>
-                  {flowing && (
-                    <mesh>
-                      <cylinderGeometry
-                        args={[.09, .09, Math.max(.05, len - .08), 12, 1]}
-                      />
-                      <meshBasicMaterial
-                        color="#35bdf5"
-                        transparent
-                        opacity={.88}
-                        toneMapped={false}
-                      />
-                    </mesh>
-                  )}
-                  {flowing && <WaterFlow length={Math.max(.1, len)} />}
-                </>
-              )
-              : (
-                <>
-                  <mesh>
-                    <cylinderGeometry args={[.018, .018, len, 8, 1, true]} />
-                    <meshBasicMaterial
-                      color={color}
-                      transparent
-                      opacity={.15}
-                    />
-                  </mesh>
-                  {Array.from(
-                    { length: Math.max(2, Math.ceil(len / .16)) },
-                    (_, i) => (
-                      <mesh
-                        key={i}
-                        position={[
-                          0,
-                          -len / 2 +
-                          (i + .5) * len / Math.max(2, Math.ceil(len / .16)),
-                          0,
-                        ]}
-                      >
-                        <sphereGeometry args={[.025, 7, 7]} />
-                        <meshBasicMaterial color={color} />
-                      </mesh>
-                    ),
-                  )}
-                </>
-              )}
+            {Array.from({ length: dots }, (_, i) => (
+              <mesh key={i} position={from.clone().lerp(to, (i + .5) / dots)}>
+                <sphereGeometry args={[.03, 10, 8]} />
+                <meshBasicMaterial color="#d98a3d" />
+              </mesh>
+            ))}
           </group>
         );
       })}
-      {running &&
-        leaks.map((leak) => (
-          <WaterJet
+
+      {running && leaks.map((leak) => {
+        const owner = byId.get(leak.component_id);
+        const origin = new THREE.Vector3(...leak.position);
+        const direction = leak.kind === "outlet"
+          ? new THREE.Vector3(0, -1, 0)
+          : owner
+          ? origin.clone().sub(new THREE.Vector3(...owner.position)).normalize()
+          : new THREE.Vector3(0, 1, 0);
+        if (leak.kind === "break") direction.set(0, 1, 0);
+        return (
+          <Spray
             key={`${leak.component_id}-${leak.port_id}`}
-            position={leak.position}
-            outlet={leak.kind === "outlet"}
-            broken={leak.kind === "break"}
-            pressure={leak.pressure}
+            leak={leak}
+            direction={direction}
           />
-        ))}
+        );
+      })}
 
       {components.map((c) => (
         <group
           key={c.id}
+          position={c.position}
+          rotation={eulerOf(c)}
           onPointerDown={(e) => {
-            if (e.button !== 0 || placing || connectionMode) return;
+            if (e.button !== 0) return;
             e.stopPropagation();
+            if (connectionMode) {
+              const first = useStore.getState().selected;
+              if (first && first !== c.id) connect(first, c.id);
+              else setSelected(c.id);
+              return;
+            }
+            if (placing) {
+              placeAt(placing, ghostPosition);
+              return;
+            }
             setSelected(c.id);
-            if (c.type !== "tap") startDrag(e, c);
+            startDrag(e, c);
           }}
           onClick={(e) => e.stopPropagation()}
+          onPointerOver={(e) => {
+            e.stopPropagation();
+            setHovered(c.id);
+          }}
+          onPointerOut={() => setHovered((h) => (h === c.id ? null : h))}
         >
-          <ComponentMesh component={c} />
-          {c.type === "tap" && selected === c.id && (
-            <Html center position={[0, .9, 0]} distanceFactor={10}>
-              <span className={`tap-state-tag ${c.open ? "open" : "closed"}`}>
-                {c.open
-                  ? "● OPEN · USE INSPECTOR TO CLOSE"
-                  : "● CLOSED · USE INSPECTOR TO OPEN"}
-              </span>
-            </Html>
-          )}
+          <PartModel
+            c={c}
+            asset={customAssets.find((asset) => asset.id === c.customAssetId)}
+            selected={selected === c.id}
+            flowing={running && c.flow > 0}
+            flowDirection={flowDirection(c, byId, connections)}
+            showPorts={selected === c.id || connectionMode || Boolean(placing)}
+          />
         </group>
       ))}
-      {dragging && <HandCursor position={handPosition} />}
-      {base && (() => {
-        const snap = snapPlacement(
-          placing!,
-          ghostPosition,
-          rotation3,
-          components,
-          connections,
-        );
-        return (
-          <group
-            position={snap.position}
-            onPointerDown={(e) => {
-              e.stopPropagation();
-              placeAt(placing!, ghostPosition);
-            }}
-          >
-            <ComponentMesh
-              component={{
-                ...base,
-                position: [0, 0, 0],
-                rotation3,
-                rotation: rotation3[1],
-              }}
-              ghost
-            />
-          </group>
-        );
-      })()}
-      <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, -.052, 0]}>
-        <planeGeometry args={[100, 100]} />
-        <meshBasicMaterial transparent opacity={0} />
-      </mesh>
+
+      {chosen && !dragging && (
+        <Html
+          center
+          position={[chosen.position[0], chipHeight, chosen.position[2]]}
+          style={{ pointerEvents: "none" }}
+          zIndexRange={[20, 0]}
+        >
+          <div className={`part-chip ${chosen.status}`}>
+            <b>{chosen.name}</b>
+            <span>
+              {running ? `${chosen.pressure.toFixed(0)} psi · ` : ""}
+              health {Math.round(chosen.health ?? 100)}%
+              {(chosen.type === "valve" || chosen.type === "tap") &&
+                ` · ${chosen.open ? "open" : "closed"}`}
+            </span>
+          </div>
+        </Html>
+      )}
+
+      {ghost && ghostSnap && (
+        <group
+          position={ghostSnap.position}
+          rotation={rotation3}
+          onPointerDown={(e) => {
+            e.stopPropagation();
+            placeAt(placing!, ghostPosition);
+          }}
+        >
+          <PartModel
+            c={ghost}
+            asset={placing === "custom" ? activeCustom ?? undefined : undefined}
+            ghost
+          />
+        </group>
+      )}
+
       <OrbitControls
         enabled={!dragging}
         makeDefault
         minDistance={3}
         maxDistance={60}
-        maxPolarAngle={Math.PI / 1.95}
+        maxPolarAngle={Math.PI / 2.05}
         enableDamping
         dampingFactor={.09}
         zoomSpeed={.8}
@@ -957,6 +596,13 @@ function SceneContents() {
         panSpeed={.8}
         screenSpacePanning
       />
+      <GizmoHelper alignment="bottom-right" margin={[64, 64]}>
+        <GizmoViewport
+          axisColors={["#d9534f", "#3f9f5f", "#3b82c4"]}
+          labelColor="#ffffff"
+          axisHeadScale={.9}
+        />
+      </GizmoHelper>
     </>
   );
 }
@@ -988,12 +634,12 @@ function StaticNetwork() {
     custom: "CUSTOM",
   };
   const colors: Record<ComponentEntity["type"], string> = {
-    tank: "#8fa5a5",
-    pipe: "#97a9a9",
-    "curved-pipe": "#97a9a9",
-    valve: "#dcae61",
-    tap: "#65c9d4",
-    custom: "#a991cf",
+    tank: "#5f7a73",
+    pipe: "#7d8f89",
+    "curved-pipe": "#7d8f89",
+    valve: "#b8862f",
+    tap: "#2f8fa6",
+    custom: "#7a62b0",
   };
   const centerX = point(0, 0).x, centerY = point(0, 0).y;
   const doPlace = (event: ReactMouseEvent<SVGSVGElement>) => {
@@ -1045,7 +691,7 @@ function StaticNetwork() {
               <path
                 d={`M ${scale / 2} 0 L 0 0 0 ${scale / 2}`}
                 fill="none"
-                stroke="#293535"
+                stroke="#d6e0db"
                 strokeWidth="1"
               />
             </pattern>
@@ -1056,7 +702,7 @@ function StaticNetwork() {
             y1="0"
             x2={centerX}
             y2={height}
-            stroke="#be776733"
+            stroke="#d9534f40"
             strokeWidth="1"
           />
           <line
@@ -1064,7 +710,7 @@ function StaticNetwork() {
             y1={centerY}
             x2={width}
             y2={centerY}
-            stroke="#68a48f33"
+            stroke="#3b82c440"
             strokeWidth="1"
           />
           {connections.map((c) => {
@@ -1080,7 +726,7 @@ function StaticNetwork() {
                   y1={p1.y}
                   x2={p2.x}
                   y2={p2.y}
-                  stroke="#111819"
+                  stroke="#9fb1a9"
                   strokeWidth="19"
                   strokeLinecap="round"
                 />
@@ -1089,7 +735,7 @@ function StaticNetwork() {
                   y1={p1.y}
                   x2={p2.x}
                   y2={p2.y}
-                  stroke="#9eaeab"
+                  stroke="#dfe7e3"
                   strokeWidth="10"
                   strokeLinecap="round"
                 />
@@ -1098,7 +744,7 @@ function StaticNetwork() {
                   y1={p1.y}
                   x2={p2.x}
                   y2={p2.y}
-                  stroke="#d2ded7"
+                  stroke="#ffffff"
                   strokeWidth="2"
                   strokeLinecap="round"
                 />
@@ -1108,9 +754,9 @@ function StaticNetwork() {
           {components.map((c) => {
             const p = point(c.position[0], c.position[2]);
             const color = c.status === "failed"
-              ? "#ff5262"
+              ? "#e5484d"
               : c.status === "warning"
-              ? "#ffbd4a"
+              ? "#e0951b"
               : colors[c.type];
             const isSelected = selected === c.id;
             return (
@@ -1127,8 +773,8 @@ function StaticNetwork() {
               >
                 <circle
                   r={isSelected ? 27 : 23}
-                  fill={isSelected ? "#a7ed7022" : "#121819"}
-                  stroke={isSelected ? "#a7ed70" : color}
+                  fill={isSelected ? "#1f8a701a" : "#ffffff"}
+                  stroke={isSelected ? "#1f8a70" : color}
                   strokeWidth={isSelected ? 3 : 2}
                 />
                 <circle r="15" fill={color} opacity=".2" stroke={color} />
@@ -1143,12 +789,12 @@ function StaticNetwork() {
                   {glyph[c.type]}
                 </text>
                 {c.status === "failed" && (
-                  <circle cx="18" cy="-18" r="6" fill="#ff5262" />
+                  <circle cx="18" cy="-18" r="6" fill="#e5484d" />
                 )}
                 <text
                   y="38"
                   textAnchor="middle"
-                  fill="#b6c3ba"
+                  fill="#2b3f39"
                   fontSize="10"
                   fontFamily="DM Sans"
                 >
@@ -1157,7 +803,7 @@ function StaticNetwork() {
                 <text
                   y="51"
                   textAnchor="middle"
-                  fill="#73827b"
+                  fill="#62756d"
                   fontSize="8"
                   fontFamily="DM Mono"
                 >
@@ -1210,12 +856,11 @@ export default function NetworkScene() {
   return (
     <CanvasErrorBoundary onError={() => setWebglAvailable(false)}>
       <Canvas
-        shadows
-        dpr={[1, 1.5]}
-        gl={{ antialias: true, powerPreference: "low-power" }}
+        dpr={[1, 2]}
+        gl={{ antialias: true }}
         fallback={<StaticNetwork />}
       >
-        <PerspectiveCamera makeDefault position={[9, 8, 11]} fov={42} />
+        <PerspectiveCamera makeDefault position={[9, 8, 11]} fov={38} />
         <SceneContents />
       </Canvas>
     </CanvasErrorBoundary>
