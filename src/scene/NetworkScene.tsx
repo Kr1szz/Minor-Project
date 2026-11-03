@@ -348,27 +348,6 @@ function WaterFlow({ length }: { length: number }) {
     </group>
   );
 }
-function Leak({ position }: { position: [number, number, number] }) {
-  const ref = useRef<THREE.Group>(null);
-  useFrame(({ clock }) => {
-    if (ref.current) {
-      ref.current.position.y = position[1] - .12 -
-        Math.abs(Math.sin(clock.elapsedTime * 3)) * .55;
-    }
-  });
-  return (
-    <group ref={ref} position={position}>
-      <mesh>
-        <sphereGeometry args={[.075, 10, 10]} />
-        <meshBasicMaterial color="#75d9ff" transparent opacity={.9} />
-      </mesh>
-      <mesh position={[0, -.14, 0]}>
-        <cylinderGeometry args={[.035, .012, .28, 8]} />
-        <meshBasicMaterial color="#75d9ff" transparent opacity={.45} />
-      </mesh>
-    </group>
-  );
-}
 function WaterJet(
   { position, outlet = false, broken = false, pressure = 0 }: {
     position: [number, number, number];
@@ -895,9 +874,6 @@ function SceneContents() {
                   )}
                 </>
               )}
-            {running && pressure > 0 && !aligned && (
-              <Leak position={[0, 0, 0]} />
-            )}
           </group>
         );
       })}

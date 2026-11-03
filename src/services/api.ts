@@ -21,7 +21,8 @@ export type ApiEvent =
   | { type: 'component_removed'; payload: { component_id: string } }
   | { type: 'connection_created'; payload: ApiConnection }
   | { type: 'connection_removed'; payload: { connection_id: string } }
-  | { type: 'simulation_stopped' | 'error'; payload: Record<string, unknown> };
+  | { type: 'project_reset'; payload: ApiProject }
+  | { type: 'error'; payload: Record<string, unknown> };
 
 const fromApi = (component: ApiComponent): ComponentEntity => ({
   ...(component.properties ?? {}),
@@ -92,7 +93,10 @@ export const projectApi = {
   async simulate(projectId: string, pressure: number) {
     return fromApiSimulation(await request<ApiSimulation>(`/projects/${projectId}/simulate`, { method: 'POST', body: JSON.stringify({ source_pressure: pressure }) }));
   },
-  async reset(projectId: string) { return request<ApiProject>(`/projects/${projectId}/reset`, { method: 'POST' }); },
+  /** Atomically replaces the project's network with the given one. */
+  async reset(projectId: string, components: ComponentEntity[], connections: Connection[], pressure: number) {
+    return request<ApiProject>(`/projects/${projectId}/reset`, { method: 'POST', body: JSON.stringify({ components: components.map(toApi), connections: connections.map(toApiConnection), source_pressure: pressure }) });
+  },
   async updatePressure(projectId: string, pressure: number) { return request(`/projects/${projectId}`, { method: 'PUT', body: JSON.stringify({ source_pressure: pressure }) }); },
   async addComponent(projectId: string, component: ComponentEntity) { return request(`/projects/${projectId}/components`, { method: 'POST', body: JSON.stringify(toApi(component)) }); },
   async addConnection(projectId: string, connection: Connection) { return request(`/projects/${projectId}/connections`, { method: 'POST', body: JSON.stringify(toApiConnection(connection)) }); },

@@ -42,6 +42,12 @@ class ProjectUpdate(BaseModel):
 class SimulationRequest(BaseModel):
     source_pressure: float = Field(40, ge=0, le=300)
 
+class ResetRequest(BaseModel):
+    """Replacement network applied atomically by a project reset; empty clears the project."""
+    components: list[ComponentCreate] = Field(default_factory=list)
+    connections: list[ConnectionCreate] = Field(default_factory=list)
+    source_pressure: float = Field(40, ge=0, le=300)
+
 class AssetCreate(BaseModel):
     name: str
     category: str

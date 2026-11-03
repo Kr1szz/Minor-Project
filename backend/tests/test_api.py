@@ -60,3 +60,25 @@ def test_deleting_a_component_removes_its_connections(starter):
     project = client.get(f'/projects/{project_id}').json()
     assert len(project['components']) == 4
     assert all('valve-main' not in (c['from_component'] + c['to_component']) for c in project['connections'])
+
+
+def test_reset_replaces_the_network_in_one_request(starter):
+    project_id = new_project()
+    seed(project_id, *starter)
+    components, connections = starter
+    body = {
+        'components': [{**{k: v for k, v in c.items() if k != 'rotation3'}, 'id': f"{project_id[:8]}-r-{c['id']}"} for c in components[:2]],
+        'connections': [{**connections[0], 'from_component': f"{project_id[:8]}-r-tank-main", 'to_component': f"{project_id[:8]}-r-pipe-main"}],
+        'source_pressure': 55,
+    }
+    project = client.post(f'/projects/{project_id}/reset', json=body).json()
+    assert len(project['components']) == 2
+    assert len(project['connections']) == 1
+    assert project['source_pressure'] == 55
+
+
+def test_reset_without_a_body_clears_the_project(starter):
+    project_id = new_project()
+    seed(project_id, *starter)
+    project = client.post(f'/projects/{project_id}/reset').json()
+    assert project['components'] == [] and project['connections'] == []

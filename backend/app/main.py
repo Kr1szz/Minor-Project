@@ -4,7 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from .database import Base, SessionLocal, engine
 from . import models
-from .schemas import AssetCreate, ComponentCreate, ConnectionCreate, EventEnvelope, ProjectCreate, ProjectUpdate, SimulationRequest
+from .schemas import AssetCreate, ComponentCreate, ConnectionCreate, EventEnvelope, ProjectCreate, ProjectUpdate, ResetRequest, SimulationRequest
 from .simulation import run_simulation
 
 Base.metadata.create_all(bind=engine)
@@ -95,17 +95,28 @@ async def simulate_project(project_id: str, payload: SimulationRequest, db: Sess
     sim=models.Simulation(project_id=project_id,source_pressure=payload.source_pressure,result=result); db.add(sim); db.add(models.SimulationEvent(project_id=project_id,event_type='simulation_completed',payload={'pressure':payload.source_pressure,'diagnostic':result['diagnostic'],'leaks':result['leaks']})); db.commit(); await publish(project_id, {'version':1,'type':'simulation_completed','project_id':project_id,'payload':result}); return result
 
 @app.post('/projects/{project_id}/reset')
-async def reset_project(project_id: str, db: Session=Depends(db_session)):
+async def reset_project(project_id: str, payload: ResetRequest | None = None, db: Session=Depends(db_session)):
+    """Replace the whole network in one transaction, so an interrupted reset cannot leave it half built."""
+    payload=payload or ResetRequest()
     p=db.get(models.Project,project_id)
     if not p: raise HTTPException(404,'Project not found')
     db.query(models.Simulation).filter_by(project_id=project_id).delete()
     db.query(models.SimulationEvent).filter_by(project_id=project_id).delete()
     db.query(models.Connection).filter_by(project_id=project_id).delete()
     db.query(models.ProjectComponent).filter_by(project_id=project_id).delete()
-    p.source_pressure=40
+    for component in payload.components:
+        c=models.ProjectComponent(project_id=project_id, **component.model_dump(exclude={'id'}))
+        if component.id: c.id=component.id
+        db.add(c)
+    for connection in payload.connections:
+        c=models.Connection(project_id=project_id, **connection.model_dump(exclude={'id'}))
+        if connection.id: c.id=connection.id
+        db.add(c)
+    p.source_pressure=payload.source_pressure
     db.commit(); db.refresh(p)
-    await publish(project_id, {'version':1,'type':'simulation_stopped','project_id':project_id,'payload':{}})
-    return as_project(p)
+    project=as_project(p)
+    await publish(project_id, {'version':1,'type':'project_reset','project_id':project_id,'payload':project})
+    return project
 
 @app.get('/projects/{project_id}/diagnostics')
 def diagnostics(project_id: str, db: Session=Depends(db_session)):

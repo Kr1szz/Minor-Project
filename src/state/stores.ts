@@ -424,13 +424,10 @@ async function initializeProject(set: SetStore) {
             ),
           }));
           return;
-        case "simulation_stopped":
-          // Sent by a project reset; the re-seeded parts arrive as component_added events.
+        case "project_reset":
           set({
-            components: [],
-            connections: [],
+            ...projectApi.fromProject(event.payload),
             selected: null,
-            pressure: 40,
             running: false,
             leaks: [],
             diagnostic: readyDiagnostic,
@@ -743,13 +740,14 @@ export const useStore = create<Store>((set, get) => ({
     const projectId = get().projectId;
     if (!projectId) return;
     try {
-      await projectApi.reset(projectId);
-      await projectApi.seed(projectId, initial, initialConnections);
-      await projectApi.updatePressure(projectId, 40);
-      const project = await projectApi.getProject(projectId);
-      const state = projectApi.fromProject(project);
+      const project = await projectApi.reset(
+        projectId,
+        initial,
+        initialConnections,
+        40,
+      );
       set({
-        ...state,
+        ...projectApi.fromProject(project),
         leaks: [],
         selected: null,
         placing: null,

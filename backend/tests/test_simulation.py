@@ -45,3 +45,45 @@ def test_simulated_health_drops_with_pressure(starter):
     high = by_id(run_simulation(*starter, 150))
     assert low['pipe-upper']['health'] == 100
     assert high['pipe-upper']['health'] < 50
+
+
+def test_pressure_never_rises_downstream(starter):
+    result = by_id(run_simulation(*starter, 40))
+    path = ['tank-main', 'pipe-main', 'valve-main', 'pipe-upper', 'tap-main']
+    pressures = [result[c]['pressure'] for c in path]
+    assert pressures == sorted(pressures, reverse=True)
+    # Each part's inlet sees the source minus the losses upstream of it: 2 + 1 + 2.
+    assert result['tap-main']['pressure'] == 35
+
+
+def test_pressure_loss_comes_from_each_component(starter):
+    components, connections = starter
+    next(c for c in components if c['id'] == 'valve-main')['pressure_loss'] = 10
+    assert by_id(run_simulation(components, connections, 40))['tap-main']['pressure'] == 40 - (2 + 10 + 2)
+
+
+def test_moving_a_part_out_of_line_breaks_the_joint(starter):
+    components, connections = starter
+    next(c for c in components if c['id'] == 'pipe-upper')['position'][2] += 1
+    result = run_simulation(components, connections, 40)
+    components_by_id = by_id(result)
+    assert components_by_id['pipe-upper']['pressure'] == 0
+    assert components_by_id['tap-main']['pressure'] == 0
+    assert {'component_id': 'valve-main', 'port_id': 'outlet', 'kind': 'leak'}.items() <= next(
+        leak for leak in result['leaks'] if leak['component_id'] == 'valve-main').items()
+
+
+def test_detached_rising_pipe_leaks_from_the_tank(starter):
+    components, connections = starter
+    next(c for c in components if c['id'] == 'pipe-main')['position'][0] += 2
+    leaks = run_simulation(components, connections, 40)['leaks']
+    assert [(leak['component_id'], leak['kind']) for leak in leaks] == [('tank-main', 'leak')]
+
+
+def test_port_positions_follow_three_js_euler_order():
+    from math import pi
+
+    from app.simulation import port_world_position
+    part = {'position': [0, 0, 0], 'rotation3': [pi / 2, pi / 2, 0]}
+    # three.js: new Vector3(1, 0, 0).applyEuler(new Euler(PI / 2, PI / 2, 0)) -> (0, 1, 0)
+    assert [round(v, 6) + 0 for v in port_world_position(part, {'position': [1, 0, 0]})] == [0, 1, 0]
